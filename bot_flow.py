@@ -292,13 +292,14 @@ async def schedule_image(message, source, filename, title, day=None, item_id=Non
         if day is None:
             day = today_schedule_day()
         if day == 6:
-            parts = ["📅 <b>" + escape(title) + " · Воскресенье</b>\\n☀️ Сегодня выходной, уроков нет."]
+            parts = ["📅 <b>" + escape(title) + " · Воскресенье</b>\n☀️ Сегодня выходной, уроков нет."]
         else:
             html = await fetch_html(urljoin(SCHEDULE_BASE, filename))
             parts = schedule_text_parts(title, html, day)
-        content = "\\n\\n".join(parts)
+        content = "\n\n".join(parts)
         if len(content) > 4000:
-            content = content[:3900] + "\\n…\\nОткрой исходное расписание для остальных уроков."
+            content = parts[0] if len(parts[0]) <= 4000 else parts[0][:3500] + "…"
+            content += "\n\n⚠️ Расписание слишком длинное для одного сообщения."
         markup = day_keyboard(item_id, day if day < 6 else -1)
         if edit:
             try:
