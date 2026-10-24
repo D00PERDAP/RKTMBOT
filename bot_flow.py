@@ -150,45 +150,7 @@ async def pick(message,uid,page,idx):
     except Exception:
         await message.answer("Не удалось сохранить выбор. Попробуй ещё раз.")
 
-def font(size,bold=False):
-    names=["/usr/share/fonts/truetype/dejavu/DejaVuSans"+("-Bold" if bold else "")+".ttf",
-           "/usr/share/fonts/truetype/liberation2/LiberationSans"+("-Bold" if bold else "-Regular")+".ttf"]
-    for path in names:
-        if Path(path).exists():return ImageFont.truetype(path,size)
-    return ImageFont.load_default()
-
-def render_schedule(name,html):
-    soup=BeautifulSoup(html,"html.parser")
-    for node in soup(["script","style","nav"]):node.decompose()
-    lines=[]
-    for tr in soup.select("tr"):
-        cells=[" ".join(c.stripped_strings) for c in tr.find_all(["th","td"],recursive=False)]
-        row="  •  ".join(x for x in cells if x)
-        if row:lines.extend(textwrap.wrap(row,width=53,break_long_words=True) or [""])
-    if not lines:
-        raw=soup.get_text(" ",strip=True)
-        lines=textwrap.wrap(raw,width=55,break_long_words=True)
-    lines=lines[:110]
-    if not lines:lines=["Данные расписания пока не опубликованы."]
-    width=1100
-    height=min(12000,max(640,330+len(lines)*43))
-    im=Image.new("RGB",(width,height),"#081b30")
-    d=ImageDraw.Draw(im)
-    d.rectangle((0,0,width,16),fill="#f4f6fa")
-    d.rectangle((0,16,width,32),fill="#1d4d91")
-    d.rectangle((0,32,width,48),fill="#d83242")
-    d.text((65,90),"РКТМ  /  РАСПИСАНИЕ",font=font(32,True),fill="#9dbbdf")
-    d.text((65,150),name[:38],font=font(48,True),fill="#ffffff")
-    d.rounded_rectangle((45,245,width-45,height-65),radius=25,fill="#112c48")
-    y=270
-    for i,line in enumerate(lines):
-        if y+35>height-80:break
-        if i%2==0:d.rounded_rectangle((60,y-5,width-60,y+38),radius=7,fill="#193a59")
-        d.text((85,y),line,font=font(23),fill="#edf4ff")
-        y+=43
-    d.text((65,height-48),"Источник: rktm.info  •  Актуальные данные",font=font(19),fill="#92acc7")
-    output=io.BytesIO();im.save(output,format="PNG",optimize=True)
-    return output.getvalue()
+from schedule_cards import render_schedule
 
 async def send_schedule(message,uid):
     profile=user("telegram",uid)
@@ -206,7 +168,7 @@ async def send_schedule(message,uid):
     try:
         html=await fetch_html(urljoin(SCHEDULE_BASE,profile["filename"]))
         png=render_schedule(profile["group_name"],html)
-        await message.answer_document(BufferedInputFile(png,filename="rktm-schedule.png"),caption="🗓 "+profile["group_name"]+"\nИсточник: rktm.info")
+        await message.answer_photo(BufferedInputFile(png,filename="rktm-schedule.png"),caption="🗓 "+profile["group_name"]+"\nИсточник: rktm.info")
     except Exception:
         await message.answer("Не удалось сформировать картинку. Попробуй позже.")
 
