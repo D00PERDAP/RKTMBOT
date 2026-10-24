@@ -5,18 +5,19 @@ from html import escape
 from bs4 import BeautifulSoup
 
 CSS = """
-*{box-sizing:border-box}body{margin:0;background:#07111f;color:#eef5ff;font-family:Arial,'DejaVu Sans',sans-serif}
-.page{width:760px;padding:36px 34px 42px;background:radial-gradient(circle at 92% 0%,#213b66 0,transparent 40%),linear-gradient(160deg,#081525,#0e2034)}
-.brand{display:flex;justify-content:space-between;align-items:center;gap:12px}
-.pill{background:#2d65e9;color:white;border-radius:24px;padding:10px 16px;font-size:15px;font-weight:800;letter-spacing:1px}
-.pill.red{background:#d94362}
-h1{font-size:38px;line-height:1.16;overflow-wrap:anywhere;margin:28px 0 10px;font-weight:850}
-.subtitle{font-size:17px;color:#a9bfd8;margin:0 0 22px}
-.card{background:#152a43;border:1px solid #284361;border-radius:17px;margin:10px 0;padding:15px 18px;display:flex;gap:21px;align-items:flex-start}
-.num{background:#2c5fe0;border-radius:13px;min-width:42px;text-align:center;padding:9px 0;font-size:18px;font-weight:800}
-.content{flex:1;min-width:0;font-size:19px;line-height:1.35;overflow-wrap:anywhere;white-space:pre-wrap}
-.content span{display:block}.content span+span{color:#c0d0e4;margin-top:5px}
-.footer{display:flex;justify-content:space-between;border-top:1px solid #30445c;margin-top:24px;padding-top:16px;font-size:14px;color:#9fb4cd}
+*{box-sizing:border-box}
+body{margin:0;background:#fff;color:#202124;font-family:Arial,'DejaVu Sans',sans-serif}
+.page{width:720px;padding:30px 30px 34px;background:#fff}
+.brand{display:flex;justify-content:space-between;align-items:center;gap:10px}
+.pill{background:#b71c2b;color:#fff;border-radius:10px;padding:9px 14px;font-size:14px;font-weight:800}
+.pill.red{background:#fce8eb;color:#a31627}
+h1{font-size:33px;line-height:1.2;overflow-wrap:anywhere;margin:26px 0 8px;color:#202124}
+.subtitle{font-size:15px;color:#777;margin:0 0 20px}
+.card{background:#fff;border:1px solid #e7e7e7;border-left:7px solid #c51f35;border-radius:12px;margin:9px 0;padding:14px 16px;display:flex;gap:14px;align-items:flex-start}
+.num{background:#c51f35;color:white;border-radius:9px;min-width:36px;text-align:center;padding:8px 0;font-size:16px;font-weight:800}
+.content{flex:1;min-width:0;font-size:18px;line-height:1.36;overflow-wrap:anywhere;white-space:pre-wrap}
+.content span{display:block}.content span+span{color:#52565b;margin-top:4px}
+.footer{display:flex;justify-content:space-between;border-top:1px solid #ededed;margin-top:24px;padding-top:16px;font-size:13px;color:#777}
 """
 def extract_rows(html: str):
     soup=BeautifulSoup(html,"html.parser")
@@ -88,7 +89,7 @@ def day_number(value):
     if match:
         return DAY_NAMES[match.group().rstrip(".")]
     match=DATE_PATTERN.search(value)
-    if match and len(value)<45:
+    if match and match.group(3) and len(value)<45:
         try:
             year=int(match.group(3) or datetime.now().year)
             if year<100:
@@ -135,7 +136,11 @@ def table_rows(table):
     return rows
 
 def split_by_days(html: str):
-    """Recognize horizontal weekday columns, vertical sections, rowspans and dated headings."""
+    """Separate only explicitly marked days, preserving rowspans and column context.
+
+    Never carry a weekday from one table to another and never guess a day from
+    lesson numbers or times. Incomplete parsing is signalled by None.
+    """
     soup=BeautifulSoup(html,"html.parser")
     for tag in soup(["script","style","nav","footer"]):
         tag.decompose()
@@ -147,42 +152,60 @@ def split_by_days(html: str):
         rows=table_rows(table)
         if not rows:
             continue
+        # Horizontal layout: multiple weekday names in the same header row.
         header=None
-        for index,row in enumerate(rows[:8]):
-            labels=[day_number(value) if len(value)<45 else None for value in row]
-            unique={x for x in labels if x is not None}
-            if len(unique)>=2 and (header is None or len(unique)>header[0]):
-                header=(len(unique),index,labels)
+        for index,row in enumerate(rows[:12]):
+            labels=[day_number(v) if len(v)<=24 else None for v in row]
+            found={v for v in labels if v is not None}
+            if len(found)>=2 and (header is None or len(found)>header[0]):
+                header=(len(found),index,labels)
         if header:
             recognized=True
             _,index,labels=header
             for row in rows[index+1:]:
-                context=[value for col,value in enumerate(row) if col>=len(labels) or labels[col] is None]
+                shared=[v for j,v in enumerate(row) if j>=len(labels) or labels[j] is None]
                 for col,day in enumerate(labels):
-                    if day is not None and col<len(row) and row[col].strip():
-                        result[DAYS[day]].append(context+[row[col]])
+                    if day is not None and col<len(row):
+                        lesson=row[col].strip()
+                        if lesson and day_number(lesson) is None:
+                            result[DAYS[day]].append([v for v in shared if v]+[lesson])
             continue
+        # Vertical layout: day in first column (possibly merged down) or
+        # a standalone row. Rows before the first day are not lessons.
         current=None
+        previous_marker=None
         for row in rows:
-            matches=[day_number(value) if len(value)<45 else None for value in row]
-            positions=[i for i,day in enumerate(matches) if day is not None]
-            if positions and (positions[0]==0 or len(positions)==1):
-                current=matches[positions[0]]
+            first=row[0].strip() if row else ""
+            marker=day_number(first) if len(first)<=32 else None
+            if marker is not None:
                 recognized=True
-                rest=[value for i,value in enumerate(row) if i not in positions and value]
+                current=marker
+                previous_marker=first
+                rest=row[1:]
+                if rest and any(v.strip() for v in rest):
+                    result[DAYS[current]].append([v for v in rest if v.strip()])
+                continue
+            # Rows with another explicit day elsewhere: section header only.
+            explicit=[day_number(v) for v in row if len(v)<=24]
+            if any(v is not None for v in explicit):
+                marker=next(v for v in explicit if v is not None)
+                recognized=True
+                current=marker
+                rest=[v for v in row if day_number(v) is None and v.strip()]
                 if rest:
                     result[DAYS[current]].append(rest)
-            elif current is not None and any(row):
-                result[DAYS[current]].append([value for value in row if value])
+                continue
+            if current is not None and any(v.strip() for v in row):
+                result[DAYS[current]].append([v for v in row if v.strip()])
     if not recognized:
         current=None
         for tag in soup.find_all(["h1","h2","h3","h4","p","li"]):
             if tag.find_parent("table"):
                 continue
             value=" ".join(tag.get_text(" ",strip=True).split())
-            day=day_number(value) if len(value)<45 else None
-            if day is not None:
-                current=day
+            marker=day_number(value) if len(value)<=32 else None
+            if marker is not None:
+                current=marker
                 recognized=True
             elif current is not None and value:
                 result[DAYS[current]].append([value])
@@ -194,7 +217,7 @@ async def render_day_pages(name: str, html: str, day_index: int):
     grouped=split_by_days(html)
     if grouped is None:
         return None
-    rows=grouped[DAYS[day_index]] or [["На этот день пары не указаны"]]
+    rows=grouped[DAYS[day_index]]\n    if not rows:\n        return None
     return await render_rows_pages(name+" · "+DAYS[day_index], rows)
 
 async def render_rows_pages(name: str, rows: list[list[str]]) -> list[bytes]:

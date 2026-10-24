@@ -193,9 +193,8 @@ async def schedule_image(message, source, filename, title, day=None, item_id=Non
                 day=0
         pages = await render_day_pages(title,html,day)
         if pages is None:
-            await message.answer("На сайте нет однозначной разбивки по дням. Показываю полное расписание.")
-            pages=await render_schedule_pages(title,html)
-            day=None
+            await message.answer("Не удалось надёжно определить пары на "+DAYS[day]+". Другие дни показывать не буду.")
+            return
         if item_id is None:
             with db() as c:
                 c.execute("INSERT INTO bot_catalog_items(source,filename,title) VALUES (?,?,?) ON CONFLICT(source,filename) DO UPDATE SET title=excluded.title",(source,filename,title))
