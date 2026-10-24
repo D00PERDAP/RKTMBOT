@@ -157,6 +157,42 @@ select:focus,input:focus,.feedback-area:focus{border-color:#175cd3;box-shadow:0 
 #accountPanel{margin-top:12px}
 .footer{font-size:11px}
 @media(max-width:620px){.quick-nav{grid-template-columns:repeat(4,minmax(0,1fr))}.app{padding:12px 12px 76px}.hero{padding:16px}.hero h2{font-size:22px}}
+
+/* Wallet-inspired focused navigation */
+:root{--bg:#f4f5f8;--line:#e9edf2;--accent:#2876ef}
+body,html{background:var(--bg)}
+.app{max-width:620px;padding:14px 14px 90px}
+.top{background:transparent;border:0;padding:8px 3px;margin:0 0 8px}
+.top .muted{font-size:12px}
+.logo{width:38px;height:28px}
+.hero{background:transparent;border:0;padding:10px 2px 14px;margin:0}
+.hero small,.hero p{display:none}
+.hero h2{font-size:27px;margin:0;letter-spacing:-.6px}
+.quick-nav{position:fixed;bottom:0;left:0;right:0;z-index:50;display:grid;grid-template-columns:repeat(4,1fr);gap:0;background:#fff;border-top:1px solid var(--line);padding:9px max(10px,calc((100vw - 620px)/2));box-shadow:0 -4px 22px #1a2a3b0b}
+.quick-nav button{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:3px;background:transparent;border:0;border-radius:10px;box-shadow:none;font-size:22px;min-height:49px;padding:4px;color:#536277}
+.quick-nav button span{font-size:11px;font-weight:600}
+.quick-nav button.active{color:#1768df;background:#edf4ff}
+.panel{padding:15px;border:1px solid var(--line);border-radius:17px}
+#accountPanel{margin-top:0}
+#groupPicker{margin-top:12px}
+#groups{gap:8px}
+.group{padding:14px;border-radius:13px}
+.group span{display:none}
+#groupsTitle{font-size:15px;margin:14px 0 8px}
+#favoritePanel{margin-top:8px}
+#subscriptionHint{display:none}
+#favoriteSave{margin:6px 0 12px!important}
+.summary{padding:12px;border-radius:12px}
+.footer{display:none}
+#home[data-view="schedule"] #groupPicker,#home[data-view="schedule"] #groups,#home[data-view="schedule"] #groupsTitle,#home[data-view="schedule"] #status{display:none!important}
+#home[data-view="groups"] #favoritePanel,#home[data-view="groups"] #accountPanel,#home[data-view="groups"] #newsPanel,#home[data-view="groups"] #helpPanel{display:none!important}
+#home[data-view="news"] #favoritePanel,#home[data-view="news"] #accountPanel,#home[data-view="news"] #groupPicker,#home[data-view="news"] #groups,#home[data-view="news"] #groupsTitle,#home[data-view="news"] #status{display:none!important}
+#home[data-view="profile"] #favoritePanel,#home[data-view="profile"] #groupPicker,#home[data-view="profile"] #groups,#home[data-view="profile"] #groupsTitle,#home[data-view="profile"] #status,#home[data-view="profile"] #newsPanel{display:none!important}
+#home[data-view="profile"] #accountPanel{display:block!important}
+#home[data-view="news"] #newsPanel{display:block!important}
+#home[data-view="schedule"] #emptyScheduleCTA{display:block}
+#emptyScheduleCTA{display:none}
+@media(max-width:620px){.app{padding:12px 12px 90px}.hero{padding:8px 2px 12px}.quick-nav{grid-template-columns:repeat(4,1fr)}}
 </style>
 </head>
 <body>
@@ -173,8 +209,9 @@ select:focus,input:focus,.feedback-area:focus{border-color:#175cd3;box-shadow:0 
     <p>Выбери группу и смотри занятия.</p>
   </div>
   <div class="dashboard-strip"><div class="metric"><span>УЧЕБНАЯ ГРУППА</span><strong id="dashGroup">Не выбрана</strong><span>Синхронизация с ботом</span></div><div class="metric"><span>УВЕДОМЛЕНИЯ</span><strong id="dashNotify">—</strong><span>Об изменениях</span></div><div class="metric"><span>ДОСТУП</span><strong>Telegram</strong><span>Веб-приложение</span></div></div>
-  <div class="quick-nav"><button type="button" data-tab="schedule">Расписание</button><button type="button" data-tab="news">Новости</button><button type="button" data-tab="help">Обращения</button><button type="button" data-tab="profile">Профиль</button></div>
-  <div id="accountPanel" class="panel"><h2>👤 Мой профиль</h2><p id="accountStatus" class="muted">Проверяем подключение к Telegram…</p><label><input type="checkbox" id="notifyToggle" style="display:inline;width:auto"> 🔔 Уведомлять об изменениях</label><p><button class="btn" type="button" id="saveProfile">Сохранить выбранное расписание в боте</button></p></div>
+  <div class="quick-nav"><button type="button" data-tab="schedule">📅<span>Расписание</span></button><button type="button" data-tab="groups">👥<span>Группы</span></button><button type="button" data-tab="news">🔔<span>Новости</span></button><button type="button" data-tab="profile">👤<span>Профиль</span></button></div>
+  <div id="emptyScheduleCTA" class="panel"><strong>Моё расписание</strong><p class="muted">Выбери группу один раз — она сохранится в боте.</p><button type="button" class="btn" id="chooseGroup">Выбрать группу</button></div>
+  <div id="accountPanel" class="panel hidden"><h2>👤 Мой профиль</h2><p id="accountStatus" class="muted">Проверяем подключение к Telegram…</p><label><input type="checkbox" id="notifyToggle" style="display:inline;width:auto"> 🔔 Уведомлять об изменениях</label><p><button class="btn" type="button" id="saveProfile">Сохранить выбранное расписание в боте</button></p></div>
   <div id="newsPanel" class="panel hidden"><h2>Новости колледжа</h2><div id="newsContent" class="muted">Загрузка…</div></div>
   <div id="helpPanel" class="panel hidden"><div class="pulse-tag">ОБРАТНАЯ СВЯЗЬ</div><h2>Обращение в колледж</h2><p class="muted">Предложения, проблемы с расписанием или вопросы по работе сервиса. Сообщение попадёт в систему обращений.</p><textarea id="feedbackMessage" class="feedback-area" maxlength="2000" placeholder="Опиши вопрос или предложение..."></textarea><button type="button" class="btn" id="sendFeedback">Отправить обращение</button><p id="feedbackStatus" class="muted" aria-live="polite"></p><p class="muted">Расписание предоставляется сайтом rktm.info. Ответы ИИ появятся после подключения проверенной базы знаний.</p></div>
   <div class="panel" id="favoritePanel" style="display:none;margin-bottom:12px">
@@ -182,7 +219,7 @@ select:focus,input:focus,.feedback-area:focus{border-color:#175cd3;box-shadow:0 
     <button class="btn" id="favoriteOpen" type="button">Открыть избранное</button>
     <button class="btn secondary" id="favoriteClear" type="button">Убрать из избранного</button>
   </div>
-  <div class="panel">
+  <div class="panel" id="groupPicker">
     <label class="label" for="source">Раздел расписания</label>
     <select id="source">
       <option value="raspisan">Расписание студентов</option>
@@ -218,7 +255,32 @@ select:focus,input:focus,.feedback-area:focus{border-color:#175cd3;box-shadow:0 
 <div class="footer">Источник данных: rktm.info</div>
 </div>
 
-<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<script src="https://telegram.org/js/telegram-web-app.js">
+function activateView(tab){
+  const valid=['schedule','groups','news','profile'];
+  if(!valid.includes(tab))tab='schedule';
+  home.dataset.view=tab;
+  document.querySelectorAll('.quick-nav [data-tab]').forEach(b=>b.classList.toggle('active',b.dataset.tab===tab));
+  $('newsPanel').classList.toggle('hidden',tab!=='news');
+  $('accountPanel').classList.toggle('hidden',tab!=='profile');
+  $('helpPanel').classList.add('hidden');
+  $('emptyScheduleCTA').style.display=tab==='schedule'&&!readFavorite()?'block':'none';
+  if(tab==='news')loadNews();
+  if(tab==='schedule'&&readFavorite()){
+    const f=readFavorite();sourceSelect.value=f.source;openSchedule(f);
+  }else{
+    ++scheduleRequest;scheduleView.classList.add('hidden');home.classList.remove('hidden');
+  }
+  window.scrollTo({top:0,behavior:'smooth'});
+}
+document.querySelectorAll('.quick-nav [data-tab]').forEach(b=>{
+  const clone=b.cloneNode(true);b.replaceWith(clone);
+  clone.addEventListener('click',()=>activateView(clone.dataset.tab));
+});
+$('chooseGroup').addEventListener('click',()=>activateView('groups'));
+$('back').addEventListener('click',()=>activateView('groups'));
+activateView('schedule');
+</script>
 <script>
 "use strict";
 
