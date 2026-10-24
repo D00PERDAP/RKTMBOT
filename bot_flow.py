@@ -179,38 +179,73 @@ def day_keyboard(item_id,selected):
     return buttons(rows)
 
 
+def schedule_text_parts(title, html, day=None):
+    """Format the source timetable as Telegram messages, no Chromium needed."""
+    from bs4 import BeautifulSoup
+    from schedule_browser import split_by_days, DAYS, table_rows
+    import html as html_lib
+    soup = BeautifulSoup(html, "html.parser")
+    for node in soup(["script", "style", "nav", "footer"]):
+        node.decompose()
+    grouped = split_by_days(html) if day is not None else None
+    if day is not None and grouped and grouped.get(DAYS[day]):
+        rows = grouped[DAYS[day]]
+        heading = "📅 " + title + " — " + DAYS[day]
+    else:
+        # Never invent an empty weekday: show the original source text.
+        rows = []
+        for table in soup.find_all("table"):
+            if table.find_parent("table"):
+                continue
+            rows.extend(table_rows(table))
+        if not rows:
+            rows = [[line.strip()] for line in soup.get_text("\n", strip=True).splitlines() if line.strip()]
+        heading = "📋 " + title + " — полное расписание"
+        if day is not None:
+            heading += "\n⚠️ День не выделен в исходной таблице. Ниже полные данные без потерь."
+    lines = []
+    for row in rows:
+        cells = [str(v).strip() for v in row if str(v).strip()]
+        if cells:
+            # Deduplicate merged-cell repeats in the same row.
+            unique = []
+            for cell in cells:
+                if not unique or cell != unique[-1]:
+                    unique.append(cell)
+            lines.append("• " + "  |  ".join(unique))
+    if not lines:
+        lines = ["Расписание пока пустое."]
+    parts = []
+    current = heading
+    for line in lines:
+        if len(current) + len(line) + 1 > 3600:
+            parts.append(current)
+            current = "📋 " + title + " (продолжение)"
+        if len(line) > 3500:
+            line = line[:3497] + "..."
+        current += "\n" + line
+    parts.append(current)
+    return parts
+
+
 async def schedule_image(message, source, filename, title, day=None, item_id=None):
     from app import fetch_html, SCHEDULE_BASE
-    from schedule_browser import render_schedule_pages, render_day_pages, DAYS
-    if source not in SOURCES.values() or not re.fullmatch(r"[^/\\?#]+\.html?", filename, re.I):
+    if source not in SOURCES.values() or not re.fullmatch(r"[^/\\?#]+\\.html?", filename, re.I):
         await message.answer("Некорректное расписание.")
         return
     try:
         html = await fetch_html(urljoin(SCHEDULE_BASE, filename))
-        if day is None:
-            day=__import__("datetime").datetime.now().weekday()
-            if day>5:
-                day=0
-        pages = await render_day_pages(title,html,day)
-        if pages is None:
-            await message.answer("Не удалось надёжно определить пары на "+DAYS[day]+". Другие дни показывать не буду.")
-            return
         if item_id is None:
             with db() as c:
                 c.execute("INSERT INTO bot_catalog_items(source,filename,title) VALUES (?,?,?) ON CONFLICT(source,filename) DO UPDATE SET title=excluded.title",(source,filename,title))
                 item=c.execute("SELECT id FROM bot_catalog_items WHERE source=? AND filename=?",(source,filename)).fetchone()
                 item_id=item["id"]
-        for i,png in enumerate(pages,1):
-            await message.answer_photo(
-                BufferedInputFile(png,filename="schedule-"+str(i)+".png"),
-                caption=("📅 "+title+(" · "+DAYS[day] if day is not None else "")+" · "+str(i)+"/"+str(len(pages))) if i==1 else None,
-                reply_markup=day_keyboard(item_id,day) if i==len(pages) and day is not None else None,
-            )
-        if day is None:
-            await message.answer("Выбери день, если он указан в исходном расписании:",reply_markup=day_keyboard(item_id,-1))
+        parts = schedule_text_parts(title, html, day)
+        for i,part in enumerate(parts):
+            await message.answer(part, reply_markup=day_keyboard(item_id,day if day is not None else -1) if i==len(parts)-1 else None)
     except Exception:
-        log.exception("Schedule render failed")
-        await message.answer("Не удалось создать карточки. Проверь, установлен ли Chromium на сервере.")
+        log.exception("Schedule text failed")
+        await message.answer("Не удалось загрузить расписание. Попробуй позже.")
 
 
 async def show_item(message, uid, source, filename, title):
@@ -223,7 +258,7 @@ async def show_item(message, uid, source, filename, title):
     item_id=str(item["id"])
     favorite_button=("❌ Убрать из избранного","unfav:"+str(fav["id"])) if fav else ("⭐ В избранное","addid:"+item_id)
     await message.answer("📖 "+title+"\\nВыбери действие:", reply_markup=buttons([
-        [("🖼 Посмотреть расписание","imgid:"+item_id)],
+        [("📋 Посмотреть расписание","imgid:"+item_id)],
         [favorite_button],
         [("📌 Сделать моим","mineid:"+item_id)],
     ]))
@@ -302,17 +337,7 @@ async def callback(call: CallbackQuery):
             item=c.execute("SELECT * FROM bot_catalog_items WHERE id=?",(int(parts[1]),)).fetchone()
         if item:
             if parts[0]=="all":
-                from app import fetch_html,SCHEDULE_BASE
-                from schedule_browser import render_schedule_pages
-                try:
-                    pages=await render_schedule_pages(item["title"],await fetch_html(urljoin(SCHEDULE_BASE,item["filename"])))
-                    for n,png in enumerate(pages,1):
-                        await call.message.answer_photo(BufferedInputFile(png,filename="all-"+str(n)+".png"),
-                            caption=("📋 "+item["title"]+" · "+str(n)+"/"+str(len(pages))) if n==1 else None,
-                            reply_markup=day_keyboard(item["id"],-1) if n==len(pages) else None)
-                except Exception:
-                    log.exception("Full schedule render failed")
-                    await call.message.answer("Не удалось загрузить расписание.")
+                await schedule_image(call.message,item["source"],item["filename"],item["title"],None,item["id"])
             else:
                 await schedule_image(call.message,item["source"],item["filename"],item["title"],day,item["id"])
     elif data.startswith(("favorite:", "unfav:")):
