@@ -217,7 +217,9 @@ async def render_day_pages(name: str, html: str, day_index: int):
     grouped=split_by_days(html)
     if grouped is None:
         return None
-    rows=grouped[DAYS[day_index]]\n    if not rows:\n        return None
+    rows=grouped[DAYS[day_index]]
+    if not rows:
+        return None
     return await render_rows_pages(name+" · "+DAYS[day_index], rows)
 
 async def render_rows_pages(name: str, rows: list[list[str]]) -> list[bytes]:
