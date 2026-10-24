@@ -157,6 +157,7 @@ async def start(message: Message):
         await ask_role(message)
     else:
         await schedule_image(message, p["source"], p["filename"], p["group_name"])
+        await message.answer("🏠 Меню Telegram доступно снизу 👇", reply_markup=keyboard(uid))
 
 
 @router.callback_query(F.data.startswith(("onboard:", "onboardcat:", "onboardpick:")))
@@ -197,6 +198,7 @@ async def onboarding(call: CallbackQuery):
         save_user("telegram", uid, SOURCES[role], item["file"], item["name"], True)
         set_state(uid, None)
         await schedule_image(call.message, SOURCES[role], item["file"], item["name"], edit=True)
+        await call.message.answer("✅ Регистрация завершена! Кнопки главного меню находятся снизу 👇", reply_markup=keyboard(uid))
 
 
 async def onboarding_catalog(message, role, page=0):
