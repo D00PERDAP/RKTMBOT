@@ -60,6 +60,8 @@ SCHEDULE_URLS = {
 
 bot = Bot(token=BOT_TOKEN) if BOT_TOKEN else None
 dp = Dispatcher()
+from bot_flow import router as bot_only_router, setup as setup_bot_only
+dp.include_router(bot_only_router)
 
 
 class GroupParser(HTMLParser):
@@ -167,12 +169,14 @@ async def settings_menu(message: Message):
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     initialize()
+    setup_bot_only()
     if bot:
         try:
             await bot.set_my_commands([
-                BotCommand(command="start", description="Главное меню"),
-                BotCommand(command="schedule", description="Расписание"),
-                BotCommand(command="profile", description="Моя группа"),
+                BotCommand(command="start", description="Регистрация и меню"),
+                BotCommand(command="schedule", description="Расписание картинкой"),
+                BotCommand(command="admin", description="Админ-панель"),
+                BotCommand(command="profile", description="Мой профиль"),
                 BotCommand(command="notify", description="Включить уведомления"),
                 BotCommand(command="mute", description="Выключить уведомления"),
                 BotCommand(command="help", description="Помощь"),
