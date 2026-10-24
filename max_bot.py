@@ -246,42 +246,40 @@ async def handle(client, uid, text):
                        [("📆 Замены на день", "/subsdates")],
                        [("🏠 Меню", "/start")]]))
     elif command == "/subsmine":
-        from substitutions import substitutions_for, format_group_changes
-        from datetime import datetime, timedelta
+        from substitutions import substitutions_for, format_group_changes, published_days
+        from datetime import datetime
         from zoneinfo import ZoneInfo
         p = profile(uid)
         if not p or not p["filename"] or p["source"] != "raspisan":
             await send(client, uid, "Сначала выбери свою группу.", home_buttons())
             return
-        today = datetime.now(ZoneInfo(os.getenv("SCHEDULE_TIMEZONE", "Europe/Moscow"))).date()
-        messages = []
-        for delta in range(8):
-            day = (today + timedelta(days=delta)).isoformat()
-            changes = substitutions_for(p["title"], day)
-            if changes:
-                messages.append(format_group_changes(changes, p["title"], day))
+        today = datetime.now(ZoneInfo(os.getenv("SCHEDULE_TIMEZONE", "Europe/Moscow"))).date().isoformat()
+        messages = [format_group_changes(substitutions_for(p["title"], day), p["title"], day)
+                    for day in published_days(today)]
+        messages = [msg for msg in messages if msg]
         await send(client, uid, "\n\n".join(messages) if messages else
-                   "Для твоей группы пока нет опубликованных замен на ближайшие дни.",
+                   "📭 Для твоей группы актуальных замен пока нет.",
                    kb([[("⬅️ Назад", "/substitutions")]]))
     elif command == "/subsdates":
-        from datetime import datetime, timedelta
+        from substitutions import published_days, nice_date
+        from datetime import datetime
         from zoneinfo import ZoneInfo
-        today = datetime.now(ZoneInfo(os.getenv("SCHEDULE_TIMEZONE", "Europe/Moscow"))).date()
-        rows = [[((today + timedelta(days=i)).strftime("%d.%m"), f"/subsday {i}")]
-                for i in range(8)]
+        today = datetime.now(ZoneInfo(os.getenv("SCHEDULE_TIMEZONE", "Europe/Moscow"))).date().isoformat()
+        days = published_days(today)
+        rows = [[(f"📅 {nice_date(day)}", f"/subsday {day}")] for day in days]
         rows.append([("⬅️ Назад", "/substitutions")])
-        await send(client, uid, "📆 Выбери день:", kb(rows))
+        await send(client, uid, "📆 Выбери дату с опубликованными заменами:" if days else
+                   "📭 Актуальных замен пока нет.", kb(rows))
     elif command == "/subsday":
-        from datetime import datetime, timedelta
+        from datetime import datetime
         from zoneinfo import ZoneInfo
-        from substitutions import substitutions_on, format_day_changes
+        from substitutions import substitutions_on, format_day_changes, published_days
         parts = text.split()
-        if len(parts) != 2 or not parts[1].isdigit() or int(parts[1]) not in range(8):
-            await send(client, uid, "Выбери дату через «Замены на день».")
+        today = datetime.now(ZoneInfo(os.getenv("SCHEDULE_TIMEZONE", "Europe/Moscow"))).date().isoformat()
+        if len(parts) != 2 or parts[1] not in published_days(today):
+            await send(client, uid, "Эта дата уже не актуальна. Открой «Замены на день».")
             return
-        day = (datetime.now(ZoneInfo(os.getenv("SCHEDULE_TIMEZONE", "Europe/Moscow"))).date()
-               + timedelta(days=int(parts[1]))).isoformat()
-        await send(client, uid, format_day_changes(substitutions_on(day), day),
+        await send(client, uid, format_day_changes(substitutions_on(parts[1]), parts[1]),
                    kb([[("⬅️ К датам", "/subsdates")]]))
     elif command == "/profile":
         p = profile(uid)
