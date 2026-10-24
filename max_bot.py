@@ -3,6 +3,7 @@
 Production deployments should switch to MAX webhooks per official guidance.
 """
 import asyncio
+from contextvars import ContextVar
 import html
 import logging
 import os
@@ -24,6 +25,7 @@ API = "https://platform-api2.max.ru"
 TOKEN = os.getenv("MAX_BOT_TOKEN", "").strip()
 SOURCES = {"groups": "raspisan", "teachers": "Praspisan"}
 log = logging.getLogger("rktm.max")
+EDIT_TARGET = ContextVar("max_edit_target", default=None)
 
 
 def init_max():
@@ -75,17 +77,36 @@ def home_buttons():
 
 
 async def send(client, user_id, text, keyboard=None):
-    # MAX message size limit; split on line boundaries where possible.
-    while text:
-        chunk = text[:3500]
-        if len(text) > 3500 and "\n" in chunk:
-            chunk = chunk[:chunk.rfind("\n")] or chunk
+    """Edit the pressed menu in place; send normally for typed commands."""
+    target = EDIT_TARGET.get()
+    remaining = text or " "
+    first = True
+    while remaining:
+        chunk = remaining[:3500]
+        if len(remaining) > 3500 and "\\n" in chunk:
+            chunk = chunk[:chunk.rfind("\\n")] or chunk
+        remaining = remaining[len(chunk):].lstrip("\\n")
+        payload = {"text": chunk, "attachments": [keyboard] if keyboard and not remaining else []}
+        if target and first:
+            try:
+                response = await client.put(
+                    "/messages", params={"message_id": target},
+                    json={**payload, "notify": False}, timeout=25,
+                )
+                response.raise_for_status()
+                result = response.json()
+                if result.get("success") is False:
+                    raise ValueError(result.get("message", "MAX edit failed"))
+                first = False
+                continue
+            except (httpx.HTTPError, ValueError):
+                log.exception("Cannot edit MAX menu; sending new message")
         response = await client.post(
             "/messages", params={"user_id": int(user_id)},
-            json={"text": chunk, **({"attachments": [keyboard]} if keyboard and len(text) <= 3500 else {})}, timeout=25,
+            json=payload, timeout=25,
         )
         response.raise_for_status()
-        text = text[len(chunk):].lstrip("\n")
+        first = False
 
 
 async def catalog(client, uid, source, page=0):
@@ -248,6 +269,7 @@ async def run():
                         callback = update.get("callback") or {}
                         uid = str((callback.get("user") or {}).get("user_id", ""))
                         message = callback.get("payload", "")
+                        edit_mid = ((update.get("message") or {}).get("body") or {}).get("mid")
                         callback_id = callback.get("callback_id")
                         if callback_id:
                             try:
@@ -259,10 +281,13 @@ async def run():
                     else:
                         continue
                     if uid and uid != "None":
+                        token = EDIT_TARGET.set(edit_mid if kind == "message_callback" else None)
                         try:
                             await handle(client, uid, message)
                         except Exception:
                             log.exception("Failed to handle MAX message for user %s", uid)
+                        finally:
+                            EDIT_TARGET.reset(token)
                 marker = data.get("marker", marker)
             except (httpx.HTTPError, ValueError):
                 log.exception("MAX polling error, retrying")
