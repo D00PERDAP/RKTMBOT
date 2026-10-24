@@ -105,8 +105,6 @@ def main_keyboard():
         [KeyboardButton(text="📅 Расписание"), KeyboardButton(text="👥 Моя группа")],
         [KeyboardButton(text="🔔 Изменения"), KeyboardButton(text="⚙️ Настройки")],
     ]
-    if WEBAPP_URL.startswith("https://"):
-        rows.append([KeyboardButton(text="📱 Открыть приложение", web_app=WebAppInfo(url=WEBAPP_URL))])
     return ReplyKeyboardMarkup(keyboard=rows, resize_keyboard=True, is_persistent=True)
 
 
