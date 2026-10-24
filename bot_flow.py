@@ -108,6 +108,13 @@ async def show_screen(message, text, *, edit=False, **kwargs):
         except Exception:
             log.debug("Old screen could not be deleted", exc_info=True)
     sent = await message.answer(text, **kwargs)
+    # Telegram reply keyboard belongs to a chat message. Deleting that message
+    # later can make the persistent bottom keyboard disappear in some clients.
+    # Keep keyboard-bearing messages outside the replaceable screen lifecycle.
+    if isinstance(kwargs.get("reply_markup"), ReplyKeyboardMarkup):
+        with db() as c:
+            c.execute("DELETE FROM bot_screen_messages WHERE chat_id=?", (str(chat_id),))
+        return sent
     with db() as c:
         c.execute("INSERT INTO bot_screen_messages(chat_id,message_id) VALUES (?,?) ON CONFLICT(chat_id) DO UPDATE SET message_id=excluded.message_id",
                   (str(chat_id), sent.message_id))
