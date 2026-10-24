@@ -25,6 +25,7 @@ from aiogram import Bot, Dispatcher
 from aiogram.filters import CommandStart, Command
 from aiogram.types import (
     Message,
+    BotCommand,
     Update,
     ReplyKeyboardMarkup,
     KeyboardButton,
@@ -97,30 +98,87 @@ class GroupParser(HTMLParser):
         self.parts = []
 
 
+def main_keyboard():
+    rows = [
+        [KeyboardButton(text="📅 Расписание"), KeyboardButton(text="👥 Моя группа")],
+        [KeyboardButton(text="🔔 Изменения"), KeyboardButton(text="⚙️ Настройки")],
+    ]
+    if WEBAPP_URL.startswith("https://"):
+        rows.append([KeyboardButton(text="📱 Открыть приложение", web_app=WebAppInfo(url=WEBAPP_URL))])
+    return ReplyKeyboardMarkup(keyboard=rows, resize_keyboard=True, is_persistent=True)
+
+
 @dp.message(CommandStart())
 async def start_command(message: Message):
-    keyboard = ReplyKeyboardMarkup(
-        keyboard=[[
-            KeyboardButton(
-                text="🔴 Открыть РКТМ NEXT",
-                web_app=WebAppInfo(url=WEBAPP_URL),
-            )
-        ]],
-        resize_keyboard=True,
-        is_persistent=True,
-    )
     await message.answer(
-        "🔴 РКТМ NEXT — твой цифровой кампус.\n\n"
-        "📅 Расписание и изменения\n⚡ Новости\n👤 Твоя группа и уведомления\n💬 Поддержка\n\n"
-        "Открой приложение — профиль синхронизируется с ботом.",
-        reply_markup=keyboard,
+        "РКТМ · Расписание колледжа\nВыбери действие 👇",
+        reply_markup=main_keyboard(),
     )
-    await message.answer("Открыть мини-приложение:", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🚀 Запустить РКТМ NEXT", web_app=WebAppInfo(url=WEBAPP_URL))]]))
+
+
+@dp.message(Command("schedule"))
+@dp.message(lambda m: m.text == "📅 Расписание")
+async def schedule_menu(message: Message):
+    current = user("telegram", str(message.from_user.id))
+    if current and current["filename"]:
+        text = f"📅 Твоя группа: {current['group_name']}\nОткрой расписание в приложении."
+    else:
+        text = "📅 Сначала выбери группу в приложении."
+    markup = InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="Открыть расписание", web_app=WebAppInfo(url=WEBAPP_URL))
+    ]]) if WEBAPP_URL.startswith("https://") else None
+    await message.answer(text, reply_markup=markup)
+
+
+@dp.message(lambda m: m.text == "👥 Моя группа")
+async def group_menu(message: Message):
+    current = user("telegram", str(message.from_user.id))
+    if current and current["filename"]:
+        await message.answer(f"👥 Группа: {current['group_name']}\nЧтобы изменить, открой приложение.")
+    else:
+        await message.answer("Группа пока не выбрана. Открой приложение и сохрани группу.")
+
+
+@dp.message(lambda m: m.text == "🔔 Изменения")
+async def changes_menu(message: Message):
+    current = user("telegram", str(message.from_user.id))
+    if not current or not current["filename"]:
+        await message.answer("Сначала выбери группу в приложении.")
+        return
+    state = "включены" if current["notifications"] else "выключены"
+    await message.answer(f"🔔 Уведомления для {current['group_name']}: {state}.\nВключить: /notify\nВыключить: /mute")
+
+
+@dp.message(Command("notify"))
+async def notify_command(message: Message):
+    current = user("telegram", str(message.from_user.id))
+    if not current or not current["filename"]:
+        await message.answer("Сначала выбери группу в приложении.")
+        return
+    save_user("telegram", str(message.from_user.id), current["source"], current["filename"], current["group_name"], True)
+    await message.answer("🔔 Уведомления включены.")
+
+
+@dp.message(lambda m: m.text == "⚙️ Настройки")
+async def settings_menu(message: Message):
+    await message.answer("⚙️ Настройки\n/profile — моя группа\n/notify — включить уведомления\n/mute — выключить уведомления\n/help — помощь")
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     initialize()
+    if bot:
+        try:
+            await bot.set_my_commands([
+                BotCommand(command="start", description="Главное меню"),
+                BotCommand(command="schedule", description="Расписание"),
+                BotCommand(command="profile", description="Моя группа"),
+                BotCommand(command="notify", description="Включить уведомления"),
+                BotCommand(command="mute", description="Выключить уведомления"),
+                BotCommand(command="help", description="Помощь"),
+            ])
+        except Exception:
+            logger.exception("Не удалось установить меню команд Telegram")
     if bot and WEBHOOK_SECRET and WEBAPP_URL.startswith("https://"):
         try:
             await bot.set_webhook(
@@ -509,7 +567,7 @@ async def news_command(message: Message):
 
 @dp.message(Command('help'))
 async def help_command(message: Message):
-    await message.answer('🔴 РКТМ NEXT\n/start — открыть приложение\n/profile — моя группа\n/group raspisan filename.html — выбрать группу\n/mute — отключить уведомления\n/news — новости\n/help — помощь')
+    await message.answer('РКТМ · Помощь\n/start — меню\n/schedule — расписание\n/profile — моя группа\n/notify — включить уведомления\n/mute — выключить уведомления\n/news — новости')
 
 async def schedule_monitor():
     # Checks only subscribed files. First observation sets baseline without notification.
