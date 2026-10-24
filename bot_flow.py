@@ -229,7 +229,7 @@ def schedule_text_parts(title, html, day=None):
 
 async def schedule_image(message, source, filename, title, day=None, item_id=None):
     from app import fetch_html, SCHEDULE_BASE
-    if source not in SOURCES.values() or not re.fullmatch(r"[^/\\?#]+\\.html?", filename, re.I):
+    if source not in SOURCES.values() or not re.fullmatch(r"[^/\\?#]+\.html?", filename, re.I):
         await message.answer("Некорректное расписание.")
         return
     try:
