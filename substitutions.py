@@ -117,16 +117,34 @@ def digest(data):
     return hashlib.sha256(data).hexdigest()
 
 
+def nice_date(day):
+    from datetime import date
+    d = date.fromisoformat(day)
+    return f"{d:%d.%m.%Y} · {('пн', 'вт', 'ср', 'чт', 'пт', 'сб', 'вс')[d.weekday()]}"
+
+
+def published_days(today, limit=3):
+    from features import db
+    with db() as conn:
+        rows = conn.execute(
+            "SELECT DISTINCT day FROM substitution_rows WHERE day >= ? ORDER BY day LIMIT ?",
+            (today, limit)
+        ).fetchall()
+    return [r["day"] for r in rows]
+
+
 def format_group_changes(rows, group_name, date):
     key = group_key(group_name)
     matching = sorted((r for r in rows if group_key(r["group"]) == key),
                       key=lambda r: r["lesson"]) if key else []
     if not matching:
         return ""
-    parts = [f"🔔 Замены на {date}\n🎓 {group_name}"]
+    parts = [f"🔄 ЗАМЕНЫ · {nice_date(date)}\n🎓 {group_name}\n━━━━━━━━━━━━━━"]
     for r in matching:
-        parts.append(f"🔄 {r['lesson']}-й урок\nБыло: {r['original']}\n"
-                     f"Стало: {r['replacement']}" + (f"\n🏫 {r['room']}" if r["room"] else ""))
+        parts.append(f"📚 Урок №{r['lesson']}\n"
+                     f"❌ Было: {r['original']}\n"
+                     f"✅ Стало: {r['replacement']}"
+                     + (f"\n🚪 Кабинет: {r['room']}" if r["room"] else ""))
     return "\n\n".join(parts)
 
 
@@ -164,12 +182,19 @@ def substitutions_on(day):
 
 def format_day_changes(rows, day):
     if not rows:
-        return f"🔄 На {day} опубликованных замен пока нет."
-    parts = [f"🔄 Замены на {day}"]
+        return f"📭 На {nice_date(day)} замен не опубликовано."
+    groups = {}
     for r in rows:
-        parts.append(f"🎓 {r['group']} · {r['lesson']}-й урок\n"
-                     f"Было: {r['original']}\nСтало: {r['replacement']}"
-                     + (f"\n🏫 {r['room']}" if r["room"] else ""))
+        groups.setdefault(r["group"], []).append(r)
+    parts = [f"📆 ЗАМЕНЫ НА ДЕНЬ\n{nice_date(day)}",
+             f"🎓 Групп: {len(groups)} · Замен: {len(rows)}\n━━━━━━━━━━━━━━"]
+    for group, items in groups.items():
+        parts.append(f"🎓 {group}")
+        for r in items:
+            parts.append(f"  📚 Урок №{r['lesson']}\n"
+                         f"  ❌ {r['original']}\n"
+                         f"  ✅ {r['replacement']}"
+                         + (f"\n  🚪 Кабинет: {r['room']}" if r["room"] else ""))
     return "\n\n".join(parts)
 
 
