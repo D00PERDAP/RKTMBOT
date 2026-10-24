@@ -6,3 +6,4 @@ beautifulsoup4>=4.12,<5
 python-dotenv>=1.0,<2
 Pillow>=10.4,<13
 playwright>=1.55,<2
+pdfplumber>=0.11,<1
