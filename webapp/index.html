@@ -143,20 +143,34 @@ select:focus,input:focus,.feedback-area:focus{border-color:#175cd3;box-shadow:0 
 .metric strong{font-size:18px;letter-spacing:0;color:#202a39}.metric span{color:#69778b;font-size:11px}
 .toast{background:#fff;color:#202a39;border:1px solid #d5deea;border-radius:9px;box-shadow:0 10px 30px #1a2a3b20}
 @media(max-width:620px){.app{padding:12px 12px 55px}.top{padding:15px}.hero{padding:20px}.panel{padding:16px}.quick-nav{grid-template-columns:repeat(2,1fr)}.dashboard-strip{grid-template-columns:repeat(2,1fr)}.metric{padding:13px}.metric strong{font-size:15px}.dashboard-strip .metric:last-child{grid-column:span 2}}
+
+/* Simple Telegram-style edition: retain all existing app logic */
+.hero{padding:20px 22px;border-left:0;border-radius:18px}
+.hero h2{margin:5px 0;font-size:25px}
+.hero p{margin:4px 0;font-size:14px}
+.dashboard-strip{display:none}
+.quick-nav{grid-template-columns:repeat(4,minmax(0,1fr));gap:7px}
+.quick-nav button{min-height:52px;border-radius:12px;font-size:12px;padding:8px 3px}
+.panel{border-radius:16px;margin-bottom:12px}
+.top{border-radius:16px;margin-bottom:12px}
+.group,.lesson,.day-button{border-radius:14px}
+#accountPanel{margin-top:12px}
+.footer{font-size:11px}
+@media(max-width:620px){.quick-nav{grid-template-columns:repeat(4,minmax(0,1fr))}.app{padding:12px 12px 76px}.hero{padding:16px}.hero h2{font-size:22px}}
 </style>
 </head>
 <body>
 <div class="app">
 <header class="top">
   <div class="logo" aria-label="Флаг Российской Федерации"><span class="flag-white"></span><span class="flag-blue"></span><span class="flag-red"></span></div>
-  <div><h1>РКТМ</h1><div class="muted">Электронный сервис колледжа · Расписание и информация</div></div>
+  <div><h1>РКТМ</h1><div class="muted">Расписание колледжа</div></div>
 </header>
 
 <section id="home">
   <div class="hero">
-    <small>ИНФОРМАЦИОННЫЙ СЕРВИС КОЛЛЕДЖА</small>
-    <h2>Расписание и сервисы колледжа</h2>
-    <p>Актуальное расписание занятий, объявления и обращения — в одном месте.</p>
+    <small>РКТМ · ОНЛАЙН</small>
+    <h2>Твоё расписание</h2>
+    <p>Выбери группу и смотри занятия.</p>
   </div>
   <div class="dashboard-strip"><div class="metric"><span>УЧЕБНАЯ ГРУППА</span><strong id="dashGroup">Не выбрана</strong><span>Синхронизация с ботом</span></div><div class="metric"><span>УВЕДОМЛЕНИЯ</span><strong id="dashNotify">—</strong><span>Об изменениях</span></div><div class="metric"><span>ДОСТУП</span><strong>Telegram</strong><span>Веб-приложение</span></div></div>
   <div class="quick-nav"><button type="button" data-tab="schedule">Расписание</button><button type="button" data-tab="news">Новости</button><button type="button" data-tab="help">Обращения</button><button type="button" data-tab="profile">Профиль</button></div>
@@ -180,7 +194,7 @@ select:focus,input:focus,.feedback-area:focus{border-color:#175cd3;box-shadow:0 
       <input id="search" type="search" placeholder="Например, СВ-02 или фамилия">
     </div>
   </div>
-  <div class="section-title" id="groupsTitle">Доступные варианты</div>
+  <div class="section-title" id="groupsTitle">Выбери группу</div>
   <div id="groups" class="group-grid"></div>
   <div id="status" class="status">Загружаем список…</div>
 </section>
