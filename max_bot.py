@@ -74,7 +74,8 @@ def kb(rows):
 def home_buttons():
     return kb([
         [("📅 Моё расписание", "/today"), ("🔎 Все расписания", "/browse")],
-        [("⭐ Избранное", "/favorites"), ("👤 Профиль", "/profile")],
+        [("🔄 Замены", "/substitutions"), ("⭐ Избранное", "/favorites")],
+        [("👤 Профиль", "/profile")],
         [("📰 Новости", "/news"), ("🏠 Меню", "/start")],
     ])
 
@@ -239,6 +240,24 @@ async def handle(client, uid, text):
             await send(client, uid, "Используй /day 0 (пн) ... /day 5 (сб).")
         else:
             await show_schedule(client, uid, int(parts[1]))
+    elif command == "/substitutions":
+        from substitutions import substitutions_for, format_group_changes
+        from datetime import datetime, timedelta
+        from zoneinfo import ZoneInfo
+        p = profile(uid)
+        if not p or not p["filename"]:
+            await send(client, uid, "Сначала выбери свою группу.", home_buttons())
+            return
+        today = datetime.now(ZoneInfo(os.getenv("SCHEDULE_TIMEZONE", "Europe/Moscow"))).date()
+        messages = []
+        for delta in range(8):
+            date = (today + timedelta(days=delta)).isoformat()
+            rows = substitutions_for(p["title"], date) if p["source"] == "raspisan" else []
+            if rows:
+                messages.append(format_group_changes(rows, p["title"], date))
+        await send(client, uid, "\\n\\n".join(messages) if messages else
+                   "🔄 Для твоей группы пока нет опубликованных замен на ближайшие дни.",
+                   home_buttons())
     elif command == "/profile":
         p = profile(uid)
         await send(client, uid, "👤 Профиль\\nРоль: " + ("Преподаватель" if p and p.get("role")=="teacher" else "Студент") + "\\nТвоё расписание: " + (p["title"] if p else "не выбрано"),
