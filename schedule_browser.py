@@ -76,46 +76,116 @@ async def render_schedule_pages(name: str, html: str) -> list[bytes]:
 
 DAYS = ("Понедельник","Вторник","Среда","Четверг","Пятница","Суббота")
 DAY_SHORT = ("Пн","Вт","Ср","Чт","Пт","Сб")
-DAY_PATTERN = __import__("re").compile(r"(?<![А-Яа-я])(?:понедельник|вторник|среда|четверг|пятница|суббота)(?![А-Яа-я])",__import__("re").I)
+import re
+from datetime import datetime
+DAY_PATTERN = re.compile(r"(?<![а-яё])(?:понедельник|вторник|среда|четверг|пятница|суббота|пн\.?|вт\.?|ср\.?|чт\.?|пт\.?|сб\.?)(?![а-яё])",re.I)
+DATE_PATTERN = re.compile(r"(?<!\d)(\d{1,2})[./-](\d{1,2})(?:[./-](\d{2,4}))?(?!\d)")
+DAY_NAMES = {"понедельник":0,"пн":0,"вторник":1,"вт":1,"среда":2,"ср":2,"четверг":3,"чт":3,"пятница":4,"пт":4,"суббота":5,"сб":5}
+
+def day_number(value):
+    value=" ".join(value.lower().split())
+    match=DAY_PATTERN.search(value)
+    if match:
+        return DAY_NAMES[match.group().rstrip(".")]
+    match=DATE_PATTERN.search(value)
+    if match and len(value)<45:
+        try:
+            year=int(match.group(3) or datetime.now().year)
+            if year<100:
+                year+=2000
+            day=datetime(year,int(match.group(2)),int(match.group(1))).weekday()
+            return day if day<6 else None
+        except ValueError:
+            pass
+    return None
+
+def table_rows(table):
+    pending={}
+    rows=[]
+    for tr in table.find_all("tr"):
+        if tr.find_parent("table") is not table:
+            continue
+        cells=tr.find_all(["td","th"],recursive=False)
+        if not cells:
+            continue
+        row=[]
+        col=0
+        def fill():
+            nonlocal col
+            while col in pending:
+                value,remaining=pending[col]
+                row.append(value)
+                if remaining<=1:
+                    del pending[col]
+                else:
+                    pending[col]=(value,remaining-1)
+                col+=1
+        for cell in cells:
+            fill()
+            value=" ".join(cell.get_text(" ",strip=True).split())
+            span=min(int(cell.get("colspan",1)),40)
+            height=min(int(cell.get("rowspan",1)),300)
+            for _ in range(span):
+                row.append(value)
+                if height>1:
+                    pending[col]=(value,height-1)
+                col+=1
+        fill()
+        rows.append(row)
+    return rows
 
 def split_by_days(html: str):
-    """Keep all rows and group them under explicit weekday headings in source HTML.
-
-    A heading may appear in a table cell or outside the table. Do not assign
-    unknown lessons to a guessed day.
-    """
+    """Recognize horizontal weekday columns, vertical sections, rowspans and dated headings."""
     soup=BeautifulSoup(html,"html.parser")
-    for node in soup(["script","style","nav","footer"]):
-        node.decompose()
+    for tag in soup(["script","style","nav","footer"]):
+        tag.decompose()
     result={day:[] for day in DAYS}
-    current=None
     recognized=False
-    # Walk in document order; table rows are handled as units to avoid duplicates.
-    for element in soup.find_all(["tr","h1","h2","h3","h4","strong","b","p"]):
-        if element.name!="tr" and element.find_parent("tr"):
+    for table in soup.find_all("table"):
+        if table.find_parent("table"):
             continue
-        if element.name!="tr" and element.find(["tr","table"]):
+        rows=table_rows(table)
+        if not rows:
             continue
-        if element.name=="tr":
-            cells=[" ".join(c.get_text(" ",strip=True).split()) for c in element.find_all(["th","td"],recursive=False)]
-            cells=[c for c in cells if c]
-            if not cells:
-                continue
-            # Weekday headers must be standalone or short date labels, not text inside a subject.
-            match=DAY_PATTERN.search(cells[0])
-            header=(match and len(cells[0])<=42 and (len(cells)==1 or all(not x.strip() for x in cells[1:])))
-            if header:
-                current=DAYS[[x.lower() for x in DAYS].index(match.group(0).lower())]
+        header=None
+        for index,row in enumerate(rows[:8]):
+            labels=[day_number(value) if len(value)<45 else None for value in row]
+            unique={x for x in labels if x is not None}
+            if len(unique)>=2 and (header is None or len(unique)>header[0]):
+                header=(len(unique),index,labels)
+        if header:
+            recognized=True
+            _,index,labels=header
+            for row in rows[index+1:]:
+                context=[value for col,value in enumerate(row) if col>=len(labels) or labels[col] is None]
+                for col,day in enumerate(labels):
+                    if day is not None and col<len(row) and row[col].strip():
+                        result[DAYS[day]].append(context+[row[col]])
+            continue
+        current=None
+        for row in rows:
+            matches=[day_number(value) if len(value)<45 else None for value in row]
+            positions=[i for i,day in enumerate(matches) if day is not None]
+            if positions and (positions[0]==0 or len(positions)==1):
+                current=matches[positions[0]]
                 recognized=True
+                rest=[value for i,value in enumerate(row) if i not in positions and value]
+                if rest:
+                    result[DAYS[current]].append(rest)
+            elif current is not None and any(row):
+                result[DAYS[current]].append([value for value in row if value])
+    if not recognized:
+        current=None
+        for tag in soup.find_all(["h1","h2","h3","h4","p","li"]):
+            if tag.find_parent("table"):
                 continue
-            if current:
-                result[current].append(cells)
-        else:
-            value=" ".join(element.get_text(" ",strip=True).split())
-            match=DAY_PATTERN.search(value)
-            if match and len(value)<=42:
-                current=DAYS[[x.lower() for x in DAYS].index(match.group(0).lower())]
+            value=" ".join(tag.get_text(" ",strip=True).split())
+            day=day_number(value) if len(value)<45 else None
+            if day is not None:
+                current=day
                 recognized=True
+            elif current is not None and value:
+                result[DAYS[current]].append([value])
     return result if recognized else None
 
 async def render_day_pages(name: str, html: str, day_index: int):
