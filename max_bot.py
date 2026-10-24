@@ -183,6 +183,14 @@ async def show_schedule(client, uid, day=None):
             return
         schedule = await fetch_html(urljoin(SCHEDULE_BASE, p["filename"]))
         text = "\n\n".join(clean_html(part) for part in schedule_text_parts(p["title"], schedule, day))
+    from substitutions import substitutions_for, format_group_changes
+    from datetime import datetime, timedelta
+    from zoneinfo import ZoneInfo
+    local_today = datetime.now(ZoneInfo(os.getenv("SCHEDULE_TIMEZONE", "Europe/Moscow"))).date()
+    target_date = (local_today + timedelta(days=(day - local_today.weekday()) % 7)).isoformat()
+    changes = substitutions_for(p["title"], target_date) if p["source"] == "raspisan" else []
+    if changes:
+        text += "\n\n" + format_group_changes(changes, p["title"], target_date)
     await send(client, uid, text + "\n\nВыбери день:",
                kb([[("Пн", "/day 0"), ("Вт", "/day 1"), ("Ср", "/day 2")],
                    [("Чт", "/day 3"), ("Пт", "/day 4"), ("Сб", "/day 5")],
