@@ -143,21 +143,85 @@ def hash_password(password):
 
 
 async def ask_role(message):
-    await message.answer(
-        "👋 Добро пожаловать в РКТМ!\n"
-        "Регистрация: роль → имя → пароль.\n"
-        "После регистрации доступны ВСЕ расписания и избранное.",
-        reply_markup=buttons([[("🎓 Студент", "reg:s"), ("👨‍🏫 Преподаватель", "reg:t")]])
+    await show_screen(
+        message, "👋 Добро пожаловать в РКТМ!\\n\\nВыбери, кто ты:",
+        reply_markup=buttons([[("🎓 Студент", "onboard:s"), ("👨‍🏫 Преподаватель", "onboard:t")]])
     )
 
 
 @router.message(CommandStart())
 async def start(message: Message):
     uid = str(message.from_user.id)
-    if not account(uid):
+    p = user("telegram", uid)
+    if not p or not p["filename"]:
         await ask_role(message)
     else:
-        await show_screen(message,"🏠 РКТМ · Привет, "+account(uid)["display_name"]+"!", reply_markup=keyboard(uid))
+        await schedule_image(message, p["source"], p["filename"], p["group_name"])
+
+
+@router.callback_query(F.data.startswith(("onboard:", "onboardcat:", "onboardpick:")))
+async def onboarding(call: CallbackQuery):
+    await call.answer()
+    uid = str(call.from_user.id)
+    data = call.data or ""
+    if data.startswith("onboard:"):
+        role = data.split(":")[1]
+        if role not in SOURCES:
+            return
+        set_state(uid, "onboard:" + role)
+        await onboarding_catalog(call.message, role, 0)
+    elif data.startswith("onboardcat:"):
+        _, role, page = data.split(":")
+        if role in SOURCES and page.isdigit():
+            await onboarding_catalog(call.message, role, int(page))
+    elif data.startswith("onboardpick:"):
+        _, role, page, index = data.split(":")
+        if role not in SOURCES or not page.isdigit() or not index.isdigit():
+            return
+        if state(uid) != "onboard:" + role:
+            await ask_role(call.message)
+            return
+        try:
+            item = await resolve_item(role, int(page), int(index))
+        except (IndexError, KeyError, ValueError):
+            await call.message.answer("Список изменился. Выбери заново.")
+            return
+        # Existing Telegram account tables remain compatible with the old profile/menu.
+        with db() as c:
+            c.execute("INSERT INTO bot_roles(uid,role) VALUES(?,?) ON CONFLICT(uid) DO UPDATE SET role=excluded.role",
+                      (uid, "teacher" if role=="t" else "student"))
+            if not account(uid):
+                digest, salt = hash_password(secrets.token_urlsafe(32))
+                c.execute("INSERT INTO bot_accounts(uid,display_name,password_hash,password_salt) VALUES(?,?,?,?)",
+                          (uid, item["name"], digest, salt))
+        save_user("telegram", uid, SOURCES[role], item["file"], item["name"], True)
+        set_state(uid, None)
+        await schedule_image(call.message, SOURCES[role], item["file"], item["name"], edit=True)
+
+
+async def onboarding_catalog(message, role, page=0):
+    from app import fetch_html, SCHEDULE_URLS, GroupParser
+    parser = GroupParser()
+    parser.feed(await fetch_html(SCHEDULE_URLS[SOURCES[role]]))
+    items = parser.groups
+    if not items:
+        await show_screen(message, "Список пока пуст. Попробуй позже.")
+        return
+    page = min(max(0,page), (len(items)-1)//8)
+    rows = [[(item["name"][:48], f"onboardpick:{role}:{page}:{i}")]
+            for i,item in enumerate(items[page*8:page*8+8])]
+    nav = []
+    if page:
+        nav.append(("◀️", f"onboardcat:{role}:{page-1}"))
+    if (page+1)*8 < len(items):
+        nav.append(("▶️", f"onboardcat:{role}:{page+1}"))
+    if nav:
+        rows.append(nav)
+    rows.append([("↩️ Изменить роль", "onboard:s" if role=="t" else "onboard:t")])
+    await show_screen(message,
+                      ("🎓 Выбери свою группу" if role=="s" else "👨‍🏫 Выбери себя из списка преподавателей")
+                      + f" · {page+1}/{(len(items)+7)//8}",
+                      reply_markup=buttons(rows), edit=True)
 
 
 @router.message(Command("register"))
