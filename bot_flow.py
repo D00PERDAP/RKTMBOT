@@ -7,7 +7,7 @@ import textwrap
 from pathlib import Path
 from aiogram import Router, F
 from aiogram.filters import Command, CommandStart
-from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, BufferedInputFile
+from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, BufferedInputFile, ReplyKeyboardMarkup, KeyboardButton
 from bs4 import BeautifulSoup
 from PIL import Image, ImageDraw, ImageFont
 from features import db, save_user, user
@@ -55,6 +55,12 @@ def buttons(rows):
         [InlineKeyboardButton(text=label,callback_data=data) for label,data in row] for row in rows
     ])
 
+def bottom_menu():
+    return ReplyKeyboardMarkup(keyboard=[
+        [KeyboardButton(text="🖼 Моё расписание"), KeyboardButton(text="📚 Выбрать расписание")],
+        [KeyboardButton(text="👤 Профиль"), KeyboardButton(text="🔐 Админ-панель")],
+    ],resize_keyboard=True,is_persistent=True)
+
 def menu():
     return buttons([
         [("🖼 Моё расписание","b:schedule")],
@@ -71,7 +77,7 @@ async def start(message:Message):
             [("🎓 Студент","b:student"),("👨‍🏫 Преподаватель","b:teacher")]
         ]))
     else:
-        await message.answer("РКТМ · Главное меню",reply_markup=menu())
+        await message.answer("РКТМ · Главное меню",reply_markup=bottom_menu())
 
 @router.callback_query(F.data.startswith("b:"))
 async def actions(call:CallbackQuery):
@@ -80,7 +86,7 @@ async def actions(call:CallbackQuery):
     action=call.data[2:]
     if action=="student":
         set_role(uid,"student")
-        await call.message.answer("🎓 Регистрация завершена.",reply_markup=menu())
+        await call.message.answer("🎓 Регистрация завершена.",reply_markup=bottom_menu())
     elif action=="teacher":
         if approved(uid):
             set_role(uid,"teacher")
@@ -269,7 +275,7 @@ async def text_input(message:Message):
         return
     if message.text in ("📅 Расписание","🖼 Моё расписание"):
         await send_schedule(message,uid)
-    elif message.text=="👥 Моя группа":
+    elif message.text in ("👥 Моя группа","📚 Выбрать расписание"):
         await choose(message,uid)
     else:
         await message.answer("Выбери действие:",reply_markup=menu())
