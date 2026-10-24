@@ -89,7 +89,7 @@ def day_number(value):
     if match:
         return DAY_NAMES[match.group().rstrip(".")]
     match=DATE_PATTERN.search(value)
-    if match and len(value)<45:
+    if match and match.group(3) and len(value)<45:
         try:
             year=int(match.group(3) or datetime.now().year)
             if year<100:
