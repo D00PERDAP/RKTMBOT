@@ -20,7 +20,6 @@ from features import db, save_user, user
 
 router = Router()
 SCHEDULE_TIMEZONE = os.getenv("SCHEDULE_TIMEZONE", "Europe/Moscow")
-_LAST_SCHEDULE_MESSAGES = {}
 
 
 def today_schedule_day():
@@ -569,6 +568,11 @@ async def text_handler(message: Message):
         else:
             await message.answer("Неверный код. Попробуй ещё раз или /register.")
         return
+    if text in ("📅 Моё расписание", "📅 Расписание", "🔎 Все расписания", "📚 Выбрать расписание", "⭐ Избранное", "👤 Профиль", "🔐 Админ-панель", "🔔 Уведомления", "📰 Новости"):
+        try:
+            await message.delete()
+        except Exception:
+            pass
     if text in ("📅 Моё расписание","📅 Расписание"):
         await personal(message)
     elif text in ("🔎 Все расписания","📚 Выбрать расписание"):
