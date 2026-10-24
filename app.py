@@ -129,8 +129,15 @@ async def lifespan(app: FastAPI):
         except Exception:
             logger.exception("Не удалось настроить Telegram webhook")
 
+    substitution_task = asyncio.create_task(substitution_monitor()) if bot else None
     monitor = asyncio.create_task(schedule_monitor()) if bot and WEBHOOK_SECRET and WEBAPP_URL.startswith("https://") else None
     yield
+    if substitution_task:
+        substitution_task.cancel()
+        try:
+            await substitution_task
+        except asyncio.CancelledError:
+            pass
     if monitor:
         monitor.cancel()
         try:
@@ -579,3 +586,19 @@ async def schedule_monitor():
         except Exception:
             logger.exception('Schedule monitor cycle failed')
         await asyncio.sleep(max(300,int(os.getenv('MONITOR_INTERVAL_SECONDS','900'))))
+
+
+async def substitution_monitor():
+    """Automatically discover and parse replacement PDFs every five minutes."""
+    from substitutions import refresh, notify_changed, setup_store
+    setup_store()
+    await asyncio.sleep(15)
+    while True:
+        try:
+            days = await refresh()
+            if days:
+                from datetime import date
+                await notify_changed([d for d in days if d >= date.today().isoformat()], bot)
+        except Exception:
+            logger.exception("Substitution monitor failed")
+        await asyncio.sleep(300)
