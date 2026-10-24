@@ -235,7 +235,8 @@ async def profile(message:Message):
     uid=str(message.from_user.id)
     p=user("telegram",uid)
     label={"teacher":"👨‍🏫 Преподаватель","student":"🎓 Студент"}.get(role(uid),"Не зарегистрирован")
-    await message.answer("👤 Профиль\nРоль: "+label+"\\nРасписание: "+(p["group_name"] if p and p["filename"] else "не выбрано")+"\\n\\nСменить роль: /startrole",reply_markup=bottom_menu(uid))
+    detail="👤 Профиль\nРоль: "+label+"\nРасписание: "+(p["group_name"] if p and p["filename"] else "не выбрано")+"\n\nСменить роль: /startrole"
+    await message.answer(detail,reply_markup=bottom_menu(uid))
 
 @router.message(Command("admin"))
 async def admin(message:Message):
