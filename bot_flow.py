@@ -35,6 +35,7 @@ LABELS = {"s": "🎓 Группы", "t": "👨‍🏫 Преподаватели
 def setup():
     with db() as c:
         c.executescript("""
+        CREATE TABLE IF NOT EXISTS bot_screen_messages(chat_id TEXT PRIMARY KEY, message_id INTEGER NOT NULL);
         CREATE TABLE IF NOT EXISTS bot_roles(uid TEXT PRIMARY KEY, role TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS bot_states(uid TEXT PRIMARY KEY, state TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS approved_teachers(uid TEXT PRIMARY KEY);
@@ -88,6 +89,32 @@ def set_state(uid, value):
             c.execute("DELETE FROM bot_states WHERE uid=?", (str(uid),))
 
 
+async def show_screen(message, text, *, edit=False, **kwargs):
+    """Keep one bot screen per chat, including after a process restart."""
+    chat_id = message.chat.id
+    if edit:
+        try:
+            edited = await message.edit_text(text, **kwargs)
+            with db() as c:
+                c.execute("INSERT INTO bot_screen_messages(chat_id,message_id) VALUES (?,?) ON CONFLICT(chat_id) DO UPDATE SET message_id=excluded.message_id",
+                          (str(chat_id), message.message_id))
+            return edited
+        except Exception:
+            log.debug("Screen edit unavailable; replacing message", exc_info=True)
+    with db() as c:
+        old = c.execute("SELECT message_id FROM bot_screen_messages WHERE chat_id=?", (str(chat_id),)).fetchone()
+    if old:
+        try:
+            await message.bot.delete_message(chat_id, old["message_id"])
+        except Exception:
+            log.debug("Old screen could not be deleted", exc_info=True)
+    sent = await message.answer(text, **kwargs)
+    with db() as c:
+        c.execute("INSERT INTO bot_screen_messages(chat_id,message_id) VALUES (?,?) ON CONFLICT(chat_id) DO UPDATE SET message_id=excluded.message_id",
+                  (str(chat_id), sent.message_id))
+    return sent
+
+
 def buttons(rows):
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text=title, callback_data=data) for title,data in row]
@@ -131,7 +158,7 @@ async def start(message: Message):
     if not account(uid):
         await ask_role(message)
     else:
-        await message.answer("🏠 РКТМ · Привет, "+account(uid)["display_name"]+"!", reply_markup=keyboard(uid))
+        await show_screen(message,"🏠 РКТМ · Привет, "+account(uid)["display_name"]+"!", reply_markup=keyboard(uid))
 
 
 @router.message(Command("register"))
@@ -162,7 +189,7 @@ async def show_catalog(message, source_key, page=0):
         if nav:
             rows.append(nav)
         rows.append([("↩️ Все категории", "browse")])
-        await message.answer(LABELS[source_key]+" · "+str(page+1)+"/"+str((len(items)+7)//8),
+        await show_screen(message,LABELS[source_key]+" · "+str(page+1)+"/"+str((len(items)+7)//8),
                              reply_markup=buttons(rows))
     except Exception:
         log.exception("Cannot fetch schedule catalog")
@@ -301,21 +328,7 @@ async def schedule_image(message, source, filename, title, day=None, item_id=Non
             content = parts[0] if len(parts[0]) <= 4000 else parts[0][:3500] + "…"
             content += "\n\n⚠️ Расписание слишком длинное для одного сообщения."
         markup = day_keyboard(item_id, day if day < 6 else -1)
-        if edit:
-            try:
-                await message.edit_text(content, parse_mode="HTML", reply_markup=markup)
-                return
-            except Exception:
-                log.exception("Cannot edit schedule message; sending replacement")
-        uid = message.chat.id
-        previous = _LAST_SCHEDULE_MESSAGES.get(uid)
-        if previous:
-            try:
-                await message.bot.delete_message(uid, previous)
-            except Exception:
-                pass
-        sent = await message.answer(content, parse_mode="HTML", reply_markup=markup)
-        _LAST_SCHEDULE_MESSAGES[uid] = sent.message_id
+        await show_screen(message, content, edit=edit, parse_mode="HTML", reply_markup=markup)
     except Exception:
         log.exception("Schedule text failed")
         await message.answer("Не удалось загрузить расписание. Попробуй позже.")
@@ -330,7 +343,7 @@ async def show_item(message, uid, source, filename, title):
                       (uid,source,filename)).fetchone()
     item_id=str(item["id"])
     favorite_button=("❌ Убрать из избранного","unfav:"+str(fav["id"])) if fav else ("⭐ В избранное","addid:"+item_id)
-    await message.answer("📖 "+title+"\\nВыбери действие:", reply_markup=buttons([
+    await show_screen(message,"📖 "+title+"\nВыбери действие:", reply_markup=buttons([
         [("📋 Посмотреть расписание","imgid:"+item_id)],
         [favorite_button],
         [("📌 Сделать моим","mineid:"+item_id)],
@@ -341,9 +354,9 @@ async def show_favorites(message, uid):
     with db() as c:
         rows = c.execute("SELECT id,title FROM bot_favorites WHERE uid=? ORDER BY id DESC LIMIT 60", (uid,)).fetchall()
     if not rows:
-        await message.answer("⭐ Избранное пусто. Открой любое расписание и нажми «В избранное».")
+        await show_screen(message,"⭐ Избранное пусто. Открой любое расписание и нажми «В избранное».")
         return
-    await message.answer("⭐ Избранное", reply_markup=buttons([[(r["title"][:48], "favorite:"+str(r["id"]))] for r in rows]))
+    await show_screen(message,"⭐ Избранное", reply_markup=buttons([[(r["title"][:48], "favorite:"+str(r["id"]))] for r in rows]))
 
 
 @router.callback_query(F.data.startswith(("reg:", "cat:", "view:", "browse", "addid:", "unfav:", "favorite:", "imgid:", "mineid:", "day:", "all:", "today:")))
@@ -364,7 +377,7 @@ async def callback(call: CallbackQuery):
         await call.message.answer("Сначала зарегистрируйся: /start")
         return
     if data == "browse":
-        await call.message.answer("🔎 Чьё расписание открыть?", reply_markup=catalog_keyboard())
+        await show_screen(call.message,"🔎 Чьё расписание открыть?", reply_markup=catalog_keyboard(), edit=True)
     elif data.startswith("cat:"):
         parts=data.split(":")
         if len(parts)==3 and parts[2].isdigit():
@@ -394,7 +407,7 @@ async def callback(call: CallbackQuery):
             await call.message.answer("⭐ Добавлено: "+title)
         elif action=="mineid":
             save_user("telegram",uid,source,filename,title,True)
-            await call.message.answer("📌 Личное расписание: "+title,reply_markup=keyboard(uid))
+            await show_screen(call.message,"📌 Личное расписание: "+title,reply_markup=keyboard(uid))
         else:
             await schedule_image(call.message,source,filename,title,edit=True)
     elif data.startswith(("day:", "all:", "today:")):
@@ -421,7 +434,7 @@ async def callback(call: CallbackQuery):
         if not row:
             await call.message.answer("Элемент уже удалён.")
         elif command=="unfav":
-            await call.message.answer("Удалено из избранного.")
+            await show_screen(call.message,"Удалено из избранного.",edit=True)
         else:
             await show_item(call.message,uid,row["source"],row["filename"],row["title"])
 
@@ -448,7 +461,7 @@ async def profile(message: Message):
     if not a:
         await ask_role(message)
         return
-    await message.answer("👤 "+a["display_name"]+"\nРоль: "+("Преподаватель" if get_role(uid)=="teacher" else "Студент")+
+    await show_screen(message,"👤 "+a["display_name"]+"\nРоль: "+("Преподаватель" if get_role(uid)=="teacher" else "Студент")+
                          "\n📌 Личное: "+(p["group_name"] if p and p["filename"] else "не выбрано")+
                          "\n⭐ Избранное: /favorites\n🔄 Перерегистрироваться: /register",reply_markup=keyboard(uid))
 
@@ -470,7 +483,7 @@ async def personal(message: Message):
         return
     p=user("telegram",uid)
     if not p or not p["filename"]:
-        await message.answer("Сначала выбери личное расписание в разделе «🔎 Все расписания».",reply_markup=catalog_keyboard())
+        await show_screen(message,"Сначала выбери личное расписание в разделе «🔎 Все расписания».",reply_markup=catalog_keyboard())
         return
     await schedule_image(message,p["source"],p["filename"],p["group_name"])
 
@@ -485,7 +498,7 @@ async def admin(message: Message):
     if str(message.from_user.id) not in ADMIN_IDS:
         await message.answer("Нет доступа.")
         return
-    await message.answer("🔐 Админ-панель\n/addteacher ID\n/removeteacher ID\n/teachers")
+    await show_screen(message,"🔐 Админ-панель\n/addteacher ID\n/removeteacher ID\n/teachers")
 
 
 @router.message(Command("addteacher","removeteacher","teachers"))
@@ -562,7 +575,7 @@ async def text_handler(message: Message):
         if not account(uid):
             await ask_role(message)
         else:
-            await message.answer("🔎 Выбери категорию:",reply_markup=catalog_keyboard())
+            await show_screen(message,"🔎 Выбери категорию:",reply_markup=catalog_keyboard())
     elif text=="⭐ Избранное":
         await favorites(message)
     elif text=="👤 Профиль":
@@ -570,10 +583,10 @@ async def text_handler(message: Message):
     elif text=="🔐 Админ-панель":
         await admin(message)
     elif text=="🔔 Уведомления":
-        await message.answer("🔔 /notify — включить, /mute — выключить.")
+        await show_screen(message,"🔔 /notify — включить, /mute — выключить.")
     elif text=="📰 Новости":
         from features import news_list
         items=news_list()[:3]
-        await message.answer("\n\n".join(x["title"]+"\n"+x["body"][:350] for x in items) if items else "Новостей пока нет.")
+        await show_screen(message,"\n\n".join(x["title"]+"\n"+x["body"][:350] for x in items) if items else "Новостей пока нет.")
     else:
         await message.answer("Выбери действие из меню.",reply_markup=keyboard(uid) if account(uid) else None)
