@@ -200,6 +200,8 @@ def schedule_text_parts(title, html, day=None):
         if table.find_parent("table"):
             continue
         rows = table_rows(table)
+        active_day = None
+        active_entry = None
         for row in rows:
             if not row:
                 continue
@@ -208,25 +210,36 @@ def schedule_text_parts(title, html, day=None):
                 for i,value in enumerate(row[1:],1):
                     if re.search(r"\d{1,2}:\d{2}",value):
                         times[i] = value
+                active_day = None
+                active_entry = None
                 continue
             match = day_re.match(first)
-            if not match:
+            if match:
+                weekday = day_ids[match.group(1).lower()]
+                date_label = match.group(2).strip()
+                if active_day != weekday or active_entry is None or (date_label and date_label != active_entry[0]):
+                    active_entry = (date_label, [])
+                    found[weekday].append(active_entry)
+                active_day = weekday
+                cells = row[1:]
+            elif active_day is not None and (not first or first in {"_", "-", "—"} or first.isdigit()):
+                # Follow-on rows may contain additional lessons under a merged weekday cell.
+                cells = row[1:] if not first else row
+            else:
+                active_day = None
+                active_entry = None
                 continue
-            weekday = day_ids[match.group(1).lower()]
-            date_label = match.group(2).strip()
-            lessons = []
-            last = None
-            for slot,value in enumerate(row[1:],1):
+            if active_entry is None:
+                continue
+            for slot, value in enumerate(cells, 1):
                 value = " ".join(value.split()).strip()
-                if not value or value in {"_","-","—","–"}:
-                    last = None
+                if not value or value in {"_", "-", "—", "–"}:
                     continue
-                # A merged cell spans consecutive slots; display it once.
-                if value == last:
-                    continue
-                last = value
-                lessons.append((slot, times.get(slot,""), value))
-            found[weekday].append((date_label,lessons))
+                lesson = (slot, times.get(slot, ""), value)
+                # Ignore repeats introduced by colspan/rowspan, but preserve
+                # different lessons and additional rows for the same weekday.
+                if not active_entry[1] or active_entry[1][-1] != lesson:
+                    active_entry[1].append(lesson)
     if day is None:
         selected = list(range(6))
     else:
