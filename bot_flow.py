@@ -90,7 +90,7 @@ async def actions(call:CallbackQuery):
     elif action=="teacher":
         if approved(uid):
             set_role(uid,"teacher")
-            await call.message.answer("👨‍🏫 Доступ преподавателя подтверждён.",reply_markup=menu())
+            await call.message.answer("👨‍🏫 Доступ преподавателя подтверждён.",reply_markup=bottom_menu())
         else:
             set_state(uid,"teacher_code")
             await call.message.answer("Отправь кодовое слово преподавателя одним сообщением.")
@@ -106,7 +106,7 @@ async def actions(call:CallbackQuery):
         await call.message.answer(
             "👤 Роль: "+("Преподаватель" if role(uid)=="teacher" else "Студент" if role(uid)=="student" else "Не зарегистрирован")
             +"\nРасписание: "+(profile["group_name"] if profile and profile["filename"] else "не выбрано")
-            +"\nСменить роль: /startrole",reply_markup=menu())
+            +"\nСменить роль: /startrole",reply_markup=bottom_menu())
     elif action=="news":
         from features import news_list
         items=news_list()[:3]
@@ -151,7 +151,7 @@ async def pick(message,uid,page,idx):
         if idx<0 or idx>=8 or pos>=len(items):raise ValueError()
         item=items[pos]
         save_user("telegram",uid,source,item["file"],item["name"],True)
-        await message.answer("✅ Сохранено: "+item["name"],reply_markup=menu())
+        await message.answer("✅ Сохранено: "+item["name"],reply_markup=bottom_menu())
         await send_schedule(message,uid)
     except Exception:
         await message.answer("Не удалось сохранить выбор. Попробуй ещё раз.")
@@ -228,7 +228,7 @@ async def my_id(message:Message):
 async def profile(message:Message):
     uid=str(message.from_user.id)
     p=user("telegram",uid)
-    await message.answer("Роль: "+str(role(uid) or "не выбрана")+"\\nРасписание: "+(p["group_name"] if p and p["filename"] else "не выбрано"),reply_markup=menu())
+    await message.answer("Роль: "+str(role(uid) or "не выбрана")+"\\nРасписание: "+(p["group_name"] if p and p["filename"] else "не выбрано"),reply_markup=bottom_menu())
 
 @router.message(Command("admin"))
 async def admin(message:Message):
@@ -269,7 +269,7 @@ async def text_input(message:Message):
         set_state(uid,None)
         if hmac.compare_digest((message.text or "").strip().encode(),TEACHER_CODE.encode()):
             set_role(uid,"teacher")
-            await message.answer("👨‍🏫 Регистрация преподавателя завершена.",reply_markup=menu())
+            await message.answer("👨‍🏫 Регистрация преподавателя завершена.",reply_markup=bottom_menu())
         else:
             await message.answer("Неверное кодовое слово. Повтори через /startrole.")
         return
@@ -277,5 +277,9 @@ async def text_input(message:Message):
         await send_schedule(message,uid)
     elif message.text in ("👥 Моя группа","📚 Выбрать расписание"):
         await choose(message,uid)
+    elif message.text=="👤 Профиль":
+        await profile(message)
+    elif message.text=="🔐 Админ-панель":
+        await admin(message)
     else:
-        await message.answer("Выбери действие:",reply_markup=menu())
+        await message.answer("Выбери действие:",reply_markup=bottom_menu())
