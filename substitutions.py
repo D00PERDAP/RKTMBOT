@@ -9,7 +9,7 @@ import httpx
 import pdfplumber
 from bs4 import BeautifulSoup
 
-PAGE_URL = "https://rktm.info/расписание/расписание-студентов/"
+PAGE_URL = "https://rktm.info/расписание/расписание-студенов/"
 GROUP_RE = re.compile(r"([А-ЯЁ]{1,4})[-\s]?(\d{2})", re.I)
 DATE_RE = re.compile(r"(\d{1,2})[.\-](\d{1,2})[.\-](\d{2,4})")
 MONTHS = {"января": 1, "февраля": 2, "марта": 3, "апреля": 4, "мая": 5,
