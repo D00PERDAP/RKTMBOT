@@ -1,5 +1,6 @@
 """Telegram registration, public schedule browser, favorites and admin controls."""
 import hashlib
+from html import escape
 import hmac
 import logging
 import os
@@ -180,51 +181,80 @@ def day_keyboard(item_id,selected):
 
 
 def schedule_text_parts(title, html, day=None):
-    """Format the source timetable as Telegram messages, no Chromium needed."""
+    """Readable per-day schedule from the college's 12-lesson timetable."""
     from bs4 import BeautifulSoup
-    from schedule_browser import split_by_days, DAYS, table_rows
+    from schedule_browser import DAYS, table_rows
+    import re
+
+    day_re = re.compile(r"^\s*(Пнд|Втр|Срд|Чтв|Птн|Сбт|Вск|Пн|Вт|Ср|Чт|Пт|Сб|Понедельник|Вторник|Среда|Четверг|Пятница|Суббота|Воскресенье)\s*[,.: -]*(.*)$", re.I)
+    day_ids = {"пнд":0,"втр":1,"срд":2,"чтв":3,"птн":4,"сбт":5,"вск":6,
+               "пн":0,"вт":1,"ср":2,"чт":3,"пт":4,"сб":5,
+               "понедельник":0,"вторник":1,"среда":2,"четверг":3,
+               "пятница":4,"суббота":5,"воскресенье":6}
     soup = BeautifulSoup(html, "html.parser")
-    for node in soup(["script", "style", "nav", "footer"]):
-        node.decompose()
-    grouped = split_by_days(html) if day is not None else None
-    if day is not None and grouped and grouped.get(DAYS[day]):
-        rows = grouped[DAYS[day]]
-        heading = "📅 " + title + " — " + DAYS[day]
-    else:
-        # Never invent an empty weekday: show the original source text.
-        rows = []
-        for table in soup.find_all("table"):
-            if table.find_parent("table"):
+    for tag in soup(["script", "style", "nav", "footer"]):
+        tag.decompose()
+    found = {i:[] for i in range(7)}
+    times = {}
+    for table in soup.find_all("table"):
+        if table.find_parent("table"):
+            continue
+        rows = table_rows(table)
+        for row in rows:
+            if not row:
                 continue
-            rows.extend(table_rows(table))
-        if not rows:
-            rows = [[line.strip()] for line in soup.get_text("\n", strip=True).splitlines() if line.strip()]
-        heading = "📋 " + title + " — полное расписание"
-        if day is not None:
-            heading += "\n⚠️ День не выделен в исходной таблице. Ниже полные данные без потерь."
-    lines = []
-    for row in rows:
-        cells = [str(v).strip() for v in row if str(v).strip()]
-        if cells:
-            # Deduplicate merged-cell repeats in the same row.
-            unique = []
-            for cell in cells:
-                if not unique or cell != unique[-1]:
-                    unique.append(cell)
-            lines.append("• " + "  |  ".join(unique))
-    if not lines:
-        lines = ["Расписание пока пустое."]
-    parts = []
-    current = heading
-    for line in lines:
-        if len(current) + len(line) + 1 > 3600:
-            parts.append(current)
-            current = "📋 " + title + " (продолжение)"
-        if len(line) > 3500:
-            line = line[:3497] + "..."
-        current += "\n" + line
-    parts.append(current)
-    return parts
+            first = row[0].strip()
+            if first.lower().startswith("время"):
+                for i,value in enumerate(row[1:],1):
+                    if re.search(r"\d{1,2}:\d{2}",value):
+                        times[i] = value
+                continue
+            match = day_re.match(first)
+            if not match:
+                continue
+            weekday = day_ids[match.group(1).lower()]
+            date_label = match.group(2).strip()
+            lessons = []
+            last = None
+            for slot,value in enumerate(row[1:],1):
+                value = " ".join(value.split()).strip()
+                if not value or value in {"_","-","—","–"}:
+                    last = None
+                    continue
+                # A merged cell spans consecutive slots; display it once.
+                if value == last:
+                    continue
+                last = value
+                lessons.append((slot, times.get(slot,""), value))
+            found[weekday].append((date_label,lessons))
+    if day is None:
+        selected = list(range(6))
+    else:
+        selected = [day]
+    chunks = []
+    for weekday in selected:
+        entries = found.get(weekday,[])
+        heading = "📅 <b>" + escape(title) + " · " + DAYS[weekday] + "</b>"
+        if not entries:
+            chunks.append(heading + "\nРасписание на этот день не найдено в таблице.")
+            continue
+        for date_label, lessons in entries:
+            text = heading
+            if date_label:
+                text += "\n📆 " + escape(date_label)
+            if not lessons:
+                text += "\nПар не указано."
+            for slot, time_label, subject in lessons:
+                line = "\n\n<b>" + str(slot) + "-я пара"
+                if time_label:
+                    line += " · " + escape(time_label)
+                line += "</b>\n" + escape(subject)
+                if len(text) + len(line) > 3500:
+                    chunks.append(text)
+                    text = heading + "\n(продолжение)"
+                text += line
+            chunks.append(text)
+    return chunks or ["Расписание отсутствует."]
 
 
 async def schedule_image(message, source, filename, title, day=None, item_id=None):
@@ -241,7 +271,7 @@ async def schedule_image(message, source, filename, title, day=None, item_id=Non
                 item_id=item["id"]
         parts = schedule_text_parts(title, html, day)
         for i,part in enumerate(parts):
-            await message.answer(part, reply_markup=day_keyboard(item_id,day if day is not None else -1) if i==len(parts)-1 else None)
+            await message.answer(part, parse_mode="HTML", reply_markup=day_keyboard(item_id,day if day is not None else -1) if i==len(parts)-1 else None)
     except Exception:
         log.exception("Schedule text failed")
         await message.answer("Не удалось загрузить расписание. Попробуй позже.")
