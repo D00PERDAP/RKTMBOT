@@ -484,6 +484,54 @@ def verified_telegram_user(init_data: str) -> str:
         raise HTTPException(401, 'Invalid Telegram authentication')
 
 
+
+# Telegram-authenticated role registration. The shared word is an onboarding
+# gate, not strong proof of employment; use individual approvals for privileged tools.
+class RoleRegistration(BaseModel):
+    role: str = Field(pattern=r"^(student|teacher)$")
+    code: str = Field(default="", max_length=100)
+
+
+def role_store():
+    from features import db
+    with db() as conn:
+        conn.execute("""CREATE TABLE IF NOT EXISTS mini_roles (
+            telegram_id TEXT PRIMARY KEY,
+            role TEXT NOT NULL CHECK(role IN ('student','teacher'))
+        )""")
+
+
+@app.get("/api/me/role")
+async def get_my_role(x_telegram_init_data: str = Header(default="")):
+    uid = verified_telegram_user(x_telegram_init_data)
+    role_store()
+    from features import db
+    with db() as conn:
+        row = conn.execute("SELECT role FROM mini_roles WHERE telegram_id=?", (uid,)).fetchone()
+    return {"role": row["role"] if row else None}
+
+
+@app.post("/api/me/role")
+async def set_my_role(payload: RoleRegistration, x_telegram_init_data: str = Header(default="")):
+    uid = verified_telegram_user(x_telegram_init_data)
+    role_store()
+    from features import db
+    with db() as conn:
+        existing = conn.execute("SELECT role FROM mini_roles WHERE telegram_id=?", (uid,)).fetchone()
+        if existing and existing["role"] == "teacher" and payload.role == "student":
+            pass
+        if payload.role == "teacher":
+            expected = os.getenv("TEACHER_ACCESS_CODE", "РКТМПРЕПОД")
+            if not hmac.compare_digest(payload.code.strip().encode(), expected.encode()):
+                raise HTTPException(403, "Неверное кодовое слово")
+        conn.execute(
+            "INSERT INTO mini_roles (telegram_id,role) VALUES (?,?) "
+            "ON CONFLICT(telegram_id) DO UPDATE SET role=excluded.role",
+            (uid, payload.role)
+        )
+    return {"ok": True, "role": payload.role}
+
+
 class MiniProfile(BaseModel):
     source: str = Field(pattern=r'^(raspisan|Praspisan|Araspisan)$')
     filename: str = Field(min_length=1, max_length=180)
