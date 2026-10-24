@@ -7,7 +7,7 @@ import textwrap
 from pathlib import Path
 from aiogram import Router, F
 from aiogram.filters import Command, CommandStart
-from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, BufferedInputFile
+from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, BufferedInputFile, ReplyKeyboardMarkup, KeyboardButton
 from bs4 import BeautifulSoup
 from PIL import Image, ImageDraw, ImageFont
 from features import db, save_user, user
@@ -55,6 +55,16 @@ def buttons(rows):
         [InlineKeyboardButton(text=label,callback_data=data) for label,data in row] for row in rows
     ])
 
+def bottom_menu(uid):
+    rows = [
+        [KeyboardButton(text="📅 Моё расписание")],
+        [KeyboardButton(text="📚 Выбрать расписание"), KeyboardButton(text="👤 Профиль")],
+        [KeyboardButton(text="🔔 Уведомления"), KeyboardButton(text="📰 Новости")],
+    ]
+    if str(uid) in ADMIN_IDS:
+        rows.append([KeyboardButton(text="🔐 Админ-панель")])
+    return ReplyKeyboardMarkup(keyboard=rows,resize_keyboard=True,is_persistent=True)
+
 def menu():
     return buttons([
         [("🖼 Моё расписание","b:schedule")],
@@ -71,7 +81,7 @@ async def start(message:Message):
             [("🎓 Студент","b:student"),("👨‍🏫 Преподаватель","b:teacher")]
         ]))
     else:
-        await message.answer("РКТМ · Главное меню",reply_markup=menu())
+        await message.answer("РКТМ · Главное меню",reply_markup=bottom_menu(uid))
 
 @router.callback_query(F.data.startswith("b:"))
 async def actions(call:CallbackQuery):
@@ -80,11 +90,11 @@ async def actions(call:CallbackQuery):
     action=call.data[2:]
     if action=="student":
         set_role(uid,"student")
-        await call.message.answer("🎓 Регистрация завершена.",reply_markup=menu())
+        await call.message.answer("🎓 Регистрация завершена.",reply_markup=bottom_menu(uid))
     elif action=="teacher":
         if approved(uid):
             set_role(uid,"teacher")
-            await call.message.answer("👨‍🏫 Доступ преподавателя подтверждён.",reply_markup=menu())
+            await call.message.answer("👨‍🏫 Доступ преподавателя подтверждён.",reply_markup=bottom_menu(uid))
         else:
             set_state(uid,"teacher_code")
             await call.message.answer("Отправь кодовое слово преподавателя одним сообщением.")
@@ -100,7 +110,7 @@ async def actions(call:CallbackQuery):
         await call.message.answer(
             "👤 Роль: "+("Преподаватель" if role(uid)=="teacher" else "Студент" if role(uid)=="student" else "Не зарегистрирован")
             +"\nРасписание: "+(profile["group_name"] if profile and profile["filename"] else "не выбрано")
-            +"\nСменить роль: /startrole",reply_markup=menu())
+            +"\nСменить роль: /startrole",reply_markup=bottom_menu(uid))
     elif action=="news":
         from features import news_list
         items=news_list()[:3]
@@ -145,7 +155,7 @@ async def pick(message,uid,page,idx):
         if idx<0 or idx>=8 or pos>=len(items):raise ValueError()
         item=items[pos]
         save_user("telegram",uid,source,item["file"],item["name"],True)
-        await message.answer("✅ Сохранено: "+item["name"],reply_markup=menu())
+        await message.answer("✅ Сохранено: "+item["name"],reply_markup=bottom_menu(uid))
         await send_schedule(message,uid)
     except Exception:
         await message.answer("Не удалось сохранить выбор. Попробуй ещё раз.")
@@ -167,8 +177,10 @@ async def send_schedule(message,uid):
     from urllib.parse import urljoin
     try:
         html=await fetch_html(urljoin(SCHEDULE_BASE,profile["filename"]))
-        png=render_schedule(profile["group_name"],html)
-        await message.answer_photo(BufferedInputFile(png,filename="rktm-schedule.png"),caption="🗓 "+profile["group_name"]+"\nИсточник: rktm.info")
+        from schedule_browser import render_schedule_pages
+        pages=await render_schedule_pages(profile["group_name"],html)
+        for index,png in enumerate(pages,1):
+            await message.answer_photo(BufferedInputFile(png,filename=f"rktm-{index}.png"),caption="🗓 "+profile["group_name"]+f" · {index}/{len(pages)}" if index==1 else None)
     except Exception:
         await message.answer("Не удалось сформировать картинку. Попробуй позже.")
 
@@ -184,7 +196,7 @@ async def my_id(message:Message):
 async def profile(message:Message):
     uid=str(message.from_user.id)
     p=user("telegram",uid)
-    await message.answer("Роль: "+str(role(uid) or "не выбрана")+"\\nРасписание: "+(p["group_name"] if p and p["filename"] else "не выбрано"),reply_markup=menu())
+    await message.answer("Роль: "+str(role(uid) or "не выбрана")+"\\nРасписание: "+(p["group_name"] if p and p["filename"] else "не выбрано"),reply_markup=bottom_menu(uid))
 
 @router.message(Command("admin"))
 async def admin(message:Message):
@@ -225,13 +237,23 @@ async def text_input(message:Message):
         set_state(uid,None)
         if hmac.compare_digest((message.text or "").strip().encode(),TEACHER_CODE.encode()):
             set_role(uid,"teacher")
-            await message.answer("👨‍🏫 Регистрация преподавателя завершена.",reply_markup=menu())
+            await message.answer("👨‍🏫 Регистрация преподавателя завершена.",reply_markup=bottom_menu(uid))
         else:
             await message.answer("Неверное кодовое слово. Повтори через /startrole.")
         return
-    if message.text in ("📅 Расписание","🖼 Моё расписание"):
+    if message.text in ("📅 Расписание","🖼 Моё расписание","📅 Моё расписание"):
         await send_schedule(message,uid)
-    elif message.text=="👥 Моя группа":
+    elif message.text in ("👥 Моя группа","📚 Выбрать расписание"):
         await choose(message,uid)
+    elif message.text=="👤 Профиль":
+        await profile(message)
+    elif message.text=="🔐 Админ-панель":
+        await admin(message)
+    elif message.text=="🔔 Уведомления":
+        await message.answer("🔔 Настройки уведомлений: /notify — включить, /mute — выключить")
+    elif message.text=="📰 Новости":
+        from features import news_list
+        items=news_list()[:3]
+        await message.answer("\\n\\n".join(x["title"]+"\\n"+x["body"][:350] for x in items) if items else "Новостей пока нет.")
     else:
-        await message.answer("Выбери действие:",reply_markup=menu())
+        await message.answer("Выбери действие:",reply_markup=bottom_menu(uid))
