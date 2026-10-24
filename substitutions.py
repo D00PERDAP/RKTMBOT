@@ -124,3 +124,123 @@ def format_group_changes(rows, group_name, date):
         parts.append(f"🔄 {r['lesson']}-й урок\nБыло: {r['original']}\n"
                      f"Стало: {r['replacement']}" + (f"\n🏫 {r['room']}" if r["room"] else ""))
     return "\n\n".join(parts)
+
+
+def setup_store():
+    from features import db
+    with db() as conn:
+        conn.executescript("""
+        CREATE TABLE IF NOT EXISTS substitution_documents (
+            url TEXT PRIMARY KEY, day TEXT NOT NULL, digest TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS substitution_rows (
+            url TEXT NOT NULL, day TEXT NOT NULL, group_code TEXT NOT NULL,
+            lesson INTEGER NOT NULL, original TEXT NOT NULL,
+            replacement TEXT NOT NULL, room TEXT NOT NULL,
+            PRIMARY KEY(url,group_code,lesson)
+        );
+        CREATE TABLE IF NOT EXISTS substitution_deliveries (
+            platform TEXT NOT NULL, uid TEXT NOT NULL, day TEXT NOT NULL,
+            content_hash TEXT NOT NULL,
+            PRIMARY KEY(platform,uid,day)
+        );
+        """)
+
+
+def substitutions_for(group_name, day):
+    from features import db
+    key = group_key(group_name)
+    if not key:
+        return []
+    with db() as conn:
+        rows = conn.execute(
+            "SELECT day,group_code AS 'group',lesson,original,replacement,room "
+            "FROM substitution_rows WHERE day=? ORDER BY lesson", (day,)
+        ).fetchall()
+    return [dict(r) for r in rows if group_key(r["group"]) == key]
+
+
+async def refresh():
+    """Return changed dates; store only successfully parsed documents."""
+    from features import db
+    setup_store()
+    changed = set()
+    for doc in await fetch_documents():
+        try:
+            data = await download_pdf(doc["url"])
+            checksum = digest(data)
+            with db() as conn:
+                old = conn.execute("SELECT digest FROM substitution_documents WHERE url=?",
+                                   (doc["url"],)).fetchone()
+            if old and old["digest"] == checksum:
+                continue
+            rows = parse_pdf(data, doc["date"])
+            if not rows:
+                continue  # Never erase known data on an unrecognized PDF.
+            with db() as conn:
+                conn.execute("DELETE FROM substitution_rows WHERE url=?", (doc["url"],))
+                conn.executemany(
+                    "INSERT INTO substitution_rows VALUES(?,?,?,?,?,?,?)",
+                    [(doc["url"], r["date"], r["group"], r["lesson"],
+                      r["original"], r["replacement"], r["room"]) for r in rows]
+                )
+                conn.execute(
+                    "INSERT INTO substitution_documents VALUES(?,?,?) "
+                    "ON CONFLICT(url) DO UPDATE SET day=excluded.day,digest=excluded.digest",
+                    (doc["url"], doc["date"], checksum))
+            changed.add(doc["date"])
+        except Exception:
+            import logging
+            logging.getLogger(__name__).exception("Could not process substitution PDF: %s", doc["url"])
+    return changed
+
+
+async def notify_changed(days, telegram_bot=None):
+    """Send a changed group-specific digest once per version per platform."""
+    import os
+    from features import db
+    from html import escape
+    token = os.getenv("MAX_BOT_TOKEN", "").strip()
+    with db() as conn:
+        users = [dict(r) for r in conn.execute(
+            "SELECT platform,user_id,group_name FROM users WHERE notifications=1 AND group_name != ''")]
+        max_users = [dict(r) for r in conn.execute(
+            "SELECT uid AS user_id,title AS group_name,'max' AS platform "
+            "FROM max_profiles WHERE filename IS NOT NULL AND role='student'")]
+    users += max_users
+    for day in days:
+        for person in users:
+            rows = substitutions_for(person["group_name"], day)
+            message = format_group_changes(rows, person["group_name"], day)
+            if not message:
+                continue
+            checksum = digest(message.encode())
+            with db() as conn:
+                old = conn.execute(
+                    "SELECT content_hash FROM substitution_deliveries "
+                    "WHERE platform=? AND uid=? AND day=?",
+                    (person["platform"], str(person["user_id"]), day)).fetchone()
+            if old and old["content_hash"] == checksum:
+                continue
+            try:
+                if person["platform"] == "telegram" and telegram_bot:
+                    await telegram_bot.send_message(int(person["user_id"]), message)
+                elif person["platform"] == "max" and token:
+                    async with httpx.AsyncClient(
+                        base_url="https://platform-api2.max.ru",
+                        headers={"Authorization": token}, timeout=20
+                    ) as client:
+                        response = await client.post(
+                            "/messages", params={"user_id": int(person["user_id"])},
+                            json={"text": message})
+                        response.raise_for_status()
+                else:
+                    continue
+                with db() as conn:
+                    conn.execute(
+                        "INSERT INTO substitution_deliveries VALUES(?,?,?,?) "
+                        "ON CONFLICT(platform,uid,day) DO UPDATE SET content_hash=excluded.content_hash",
+                        (person["platform"], str(person["user_id"]), day, checksum))
+            except Exception:
+                import logging
+                logging.getLogger(__name__).exception("Substitution notification failed")
