@@ -165,20 +165,45 @@ async def resolve_item(source_key, page, index):
     return parser.groups[page*8+index]
 
 
-async def schedule_image(message, source, filename, title):
+def day_keyboard(item_id,selected):
+    from schedule_browser import DAY_SHORT
+    rows=[]
+    for start in (0,3):
+        rows.append([(("● " if i==selected else "")+DAY_SHORT[i],"day:"+str(item_id)+":"+str(i)) for i in range(start,start+3)])
+    rows.append([("📋 Всё расписание","all:"+str(item_id))])
+    return buttons(rows)
+
+
+async def schedule_image(message, source, filename, title, day=None, item_id=None):
     from app import fetch_html, SCHEDULE_BASE
-    from schedule_browser import render_schedule_pages
-    if source not in SOURCES.values() or not re.fullmatch(r"[^/\\?#]+\.html?", filename, re.I):
+    from schedule_browser import render_schedule_pages, render_day_pages, DAYS
+    if source not in SOURCES.values() or not re.fullmatch(r"[^/\\\\?#]+\\.html?", filename, re.I):
         await message.answer("Некорректное расписание.")
         return
     try:
         html = await fetch_html(urljoin(SCHEDULE_BASE, filename))
-        pages = await render_schedule_pages(title, html)
-        for i, png in enumerate(pages, 1):
+        if day is None:
+            day=__import__("datetime").datetime.now().weekday()
+            if day>5:
+                day=0
+        pages = await render_day_pages(title,html,day)
+        if pages is None:
+            await message.answer("На сайте нет однозначной разбивки по дням. Показываю полное расписание.")
+            pages=await render_schedule_pages(title,html)
+            day=None
+        if item_id is None:
+            with db() as c:
+                c.execute("INSERT INTO bot_catalog_items(source,filename,title) VALUES (?,?,?) ON CONFLICT(source,filename) DO UPDATE SET title=excluded.title",(source,filename,title))
+                item=c.execute("SELECT id FROM bot_catalog_items WHERE source=? AND filename=?",(source,filename)).fetchone()
+                item_id=item["id"]
+        for i,png in enumerate(pages,1):
             await message.answer_photo(
-                BufferedInputFile(png, filename="schedule-"+str(i)+".png"),
-                caption=("📅 "+title+" · "+str(i)+"/"+str(len(pages))) if i==1 else None,
+                BufferedInputFile(png,filename="schedule-"+str(i)+".png"),
+                caption=("📅 "+title+(" · "+DAYS[day] if day is not None else "")+" · "+str(i)+"/"+str(len(pages))) if i==1 else None,
+                reply_markup=day_keyboard(item_id,day) if i==len(pages) and day is not None else None,
             )
+        if day is None:
+            await message.answer("Выбери день, если он указан в исходном расписании:",reply_markup=day_keyboard(item_id,-1))
     except Exception:
         log.exception("Schedule render failed")
         await message.answer("Не удалось создать карточки. Проверь, установлен ли Chromium на сервере.")
@@ -209,7 +234,7 @@ async def show_favorites(message, uid):
     await message.answer("⭐ Избранное", reply_markup=buttons([[(r["title"][:48], "favorite:"+str(r["id"]))] for r in rows]))
 
 
-@router.callback_query(F.data.startswith(("reg:", "cat:", "view:", "browse", "addid:", "unfav:", "favorite:", "imgid:", "mineid:")))
+@router.callback_query(F.data.startswith(("reg:", "cat:", "view:", "browse", "addid:", "unfav:", "favorite:", "imgid:", "mineid:", "day:", "all:")))
 async def callback(call: CallbackQuery):
     await call.answer()
     uid = str(call.from_user.id)
@@ -260,6 +285,32 @@ async def callback(call: CallbackQuery):
             await call.message.answer("📌 Личное расписание: "+title,reply_markup=keyboard(uid))
         else:
             await schedule_image(call.message,source,filename,title)
+    elif data.startswith(("day:", "all:")):
+        parts=data.split(":")
+        if len(parts)<2 or not parts[1].isdigit():
+            return
+        day=None
+        if parts[0]=="day":
+            if len(parts)!=3 or not parts[2].isdigit() or int(parts[2])>5:
+                return
+            day=int(parts[2])
+        with db() as c:
+            item=c.execute("SELECT * FROM bot_catalog_items WHERE id=?",(int(parts[1]),)).fetchone()
+        if item:
+            if parts[0]=="all":
+                from app import fetch_html,SCHEDULE_BASE
+                from schedule_browser import render_schedule_pages
+                try:
+                    pages=await render_schedule_pages(item["title"],await fetch_html(urljoin(SCHEDULE_BASE,item["filename"])))
+                    for n,png in enumerate(pages,1):
+                        await call.message.answer_photo(BufferedInputFile(png,filename="all-"+str(n)+".png"),
+                            caption=("📋 "+item["title"]+" · "+str(n)+"/"+str(len(pages))) if n==1 else None,
+                            reply_markup=day_keyboard(item["id"],-1) if n==len(pages) else None)
+                except Exception:
+                    log.exception("Full schedule render failed")
+                    await call.message.answer("Не удалось загрузить расписание.")
+            else:
+                await schedule_image(call.message,item["source"],item["filename"],item["title"],day,item["id"])
     elif data.startswith(("favorite:", "unfav:")):
         command,_,id_text=data.partition(":")
         if not id_text.isdigit():
