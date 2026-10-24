@@ -183,7 +183,6 @@ def schedule_text_parts(title, html, day=None):
     """Format the source timetable as Telegram messages, no Chromium needed."""
     from bs4 import BeautifulSoup
     from schedule_browser import split_by_days, DAYS, table_rows
-    import html as html_lib
     soup = BeautifulSoup(html, "html.parser")
     for node in soup(["script", "style", "nav", "footer"]):
         node.decompose()
