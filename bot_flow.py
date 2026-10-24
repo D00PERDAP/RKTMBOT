@@ -575,10 +575,10 @@ def substitution_menu():
 
 
 def substitution_dates():
-    from datetime import timedelta
-    today = datetime.now(ZoneInfo(SCHEDULE_TIMEZONE)).date()
-    rows = [[((today + timedelta(days=i)).strftime("%d.%m (%a)"), f"subs:day:{i}")]
-            for i in range(8)]
+    from substitutions import published_days, nice_date
+    today = datetime.now(ZoneInfo(SCHEDULE_TIMEZONE)).date().isoformat()
+    rows = [[(f"📅 {nice_date(day)}", f"subs:day:{day}")]
+            for day in published_days(today)]
     rows.append([("⬅️ Назад", "subs:menu")])
     return buttons(rows)
 
@@ -586,7 +586,7 @@ def substitution_dates():
 @router.callback_query(F.data.startswith("subs:"))
 async def substitution_callback(call: CallbackQuery):
     from datetime import timedelta
-    from substitutions import substitutions_for, format_group_changes, substitutions_on, format_day_changes
+    from substitutions import substitutions_for, format_group_changes, substitutions_on, format_day_changes, published_days
     await call.answer()
     action = call.data
     uid = str(call.from_user.id)
@@ -596,26 +596,25 @@ async def substitution_callback(call: CallbackQuery):
     elif action == "subs:menu":
         await show_screen(call.message, "🔄 Замены — выбери раздел:", edit=True, reply_markup=substitution_menu())
     elif action == "subs:dates":
-        await show_screen(call.message, "📆 Выбери день:", edit=True, reply_markup=substitution_dates())
+        await show_screen(call.message, "📆 Выбери дату с опубликованными заменами:" if published_days(datetime.now(ZoneInfo(SCHEDULE_TIMEZONE)).date().isoformat()) else "📭 Актуальных замен пока нет.", edit=True, reply_markup=substitution_dates())
     elif action == "subs:mine":
         p = user("telegram", uid)
         if not p or not p["filename"] or p["source"] != "raspisan":
             content = "Сначала выбери свою группу через /start."
         else:
-            today = datetime.now(ZoneInfo(SCHEDULE_TIMEZONE)).date()
-            messages = []
-            for delta in range(8):
-                date = (today + timedelta(days=delta)).isoformat()
-                changes = substitutions_for(p["group_name"], date)
-                if changes:
-                    messages.append(format_group_changes(changes, p["group_name"], date))
-            content = "\n\n".join(messages) if messages else "Для твоей группы пока нет опубликованных замен на ближайшие дни."
+            today = datetime.now(ZoneInfo(SCHEDULE_TIMEZONE)).date().isoformat()
+            messages = [format_group_changes(substitutions_for(p["group_name"], day),
+                                             p["group_name"], day)
+                        for day in published_days(today)]
+            messages = [msg for msg in messages if msg]
+            content = "\n\n".join(messages) if messages else "📭 Для твоей группы актуальных замен пока нет."
         await show_screen(call.message, content[:3900], edit=True, reply_markup=substitution_menu())
     elif action.startswith("subs:day:"):
-        offset = int(action.rsplit(":", 1)[1])
-        if offset not in range(8):
+        day = action.rsplit(":", 1)[1]
+        today = datetime.now(ZoneInfo(SCHEDULE_TIMEZONE)).date().isoformat()
+        if day not in published_days(today):
+            await show_screen(call.message, "Эта дата уже не актуальна.", edit=True, reply_markup=substitution_dates())
             return
-        day = (datetime.now(ZoneInfo(SCHEDULE_TIMEZONE)).date() + timedelta(days=offset)).isoformat()
         content = format_day_changes(substitutions_on(day), day)
         await show_screen(call.message, content[:3900], edit=True, reply_markup=substitution_dates())
 
