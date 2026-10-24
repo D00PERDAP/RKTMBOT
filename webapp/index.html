@@ -193,6 +193,34 @@ body,html{background:var(--bg)}
 #home[data-view="schedule"] #emptyScheduleCTA{display:block}
 #emptyScheduleCTA{display:none}
 @media(max-width:620px){.app{padding:12px 12px 90px}.hero{padding:8px 2px 12px}.quick-nav{grid-template-columns:repeat(4,1fr)}}
+
+/* Role-aware single-screen experience */
+:root{color-scheme:dark;--bg:#071626;--card:#10243b;--text:#f2f6fd;--muted:#a2b6cf;--accent:#e33842;--line:#233d58;--soft:#17324f}
+html,body{background:#071626;color:var(--text)}
+.app{max-width:620px}
+.top{background:#0d2238;border:1px solid #234262}
+.hero{background:linear-gradient(125deg,#132e50,#071b32);border:0;border-top:3px solid #f1f5fc;border-bottom:3px solid #cf263a}
+.hero h2{color:white}
+.panel,.summary,.lesson,.group,.day-button,.empty{background:#10243b;color:var(--text);border-color:#29435e}
+select,input{background:#0b2036;color:white;border-color:#2a4664}
+.btn{background:#d72d3b}
+.quick-nav{background:#0b1b2e;border-top:2px solid #c72c3b}
+.quick-nav button{color:#aec4e0}.quick-nav button.active{background:#163757;color:white}
+#onboarding{max-width:480px;margin:40px auto 16px}
+#onboarding h2{margin-top:0}
+.role-choice{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin:18px 0}
+.role-choice button{padding:20px 9px;border-radius:16px;border:1px solid #365576;background:#142e4b;color:white;font-weight:700}
+.role-choice button.chosen{border-color:#f04451;background:#502636}
+#roleCodeWrap{margin:14px 0}
+#roleStatus{min-height:20px;color:#ff8f99}
+#roleBadge{font-size:12px;color:#b9cde4}
+#home[data-view="schedule"] #groupPicker,#home[data-view="schedule"] #groups,#home[data-view="schedule"] #groupsTitle,#home[data-view="schedule"] #status{display:none!important}
+#home[data-view="groups"] #groupPicker{display:block!important}
+#home[data-view="profile"] #accountPanel{display:block!important}
+#scheduleView .summary,#scheduleView #subscriptionHint{display:none!important}
+#scheduleView .toolbar{margin-top:12px}
+#scheduleView #favoriteSave{margin:0 0 12px!important}
+#scheduleView .day-heading .muted{display:none}
 </style>
 </head>
 <body>
@@ -202,8 +230,16 @@ body,html{background:var(--bg)}
   <div><h1>РКТМ</h1><div class="muted">Расписание колледжа</div></div>
 </header>
 
-<section id="home">
-  <div class="hero">
+<section id="onboarding" class="panel hidden">
+  <h2>Добро пожаловать в РКТМ</h2>
+  <p class="muted">Кто ты?</p>
+  <div class="role-choice"><button type="button" id="studentRole">🎓<br>Студент</button><button type="button" id="teacherRole">👨‍🏫<br>Преподаватель</button></div>
+  <div id="roleCodeWrap" class="hidden"><label for="roleCode" class="label">Кодовое слово преподавателя</label><input id="roleCode" type="password" autocomplete="off" placeholder="Введите кодовое слово"></div>
+  <button type="button" id="roleContinue" class="btn" disabled>Продолжить</button>
+  <p id="roleStatus" aria-live="polite"></p>
+</section>
+<section id="home" class="hidden">
+  <div class="hero"><div id="roleBadge"></div>
     <small>РКТМ · ОНЛАЙН</small>
     <h2>Твоё расписание</h2>
     <p>Выбери группу и смотри занятия.</p>
@@ -211,7 +247,7 @@ body,html{background:var(--bg)}
   <div class="dashboard-strip"><div class="metric"><span>УЧЕБНАЯ ГРУППА</span><strong id="dashGroup">Не выбрана</strong><span>Синхронизация с ботом</span></div><div class="metric"><span>УВЕДОМЛЕНИЯ</span><strong id="dashNotify">—</strong><span>Об изменениях</span></div><div class="metric"><span>ДОСТУП</span><strong>Telegram</strong><span>Веб-приложение</span></div></div>
   <div class="quick-nav"><button type="button" data-tab="schedule">📅<span>Расписание</span></button><button type="button" data-tab="groups">👥<span>Группы</span></button><button type="button" data-tab="news">🔔<span>Новости</span></button><button type="button" data-tab="profile">👤<span>Профиль</span></button></div>
   <div id="emptyScheduleCTA" class="panel"><strong>Моё расписание</strong><p class="muted">Выбери группу один раз — она сохранится в боте.</p><button type="button" class="btn" id="chooseGroup">Выбрать группу</button></div>
-  <div id="accountPanel" class="panel hidden"><h2>👤 Мой профиль</h2><p id="accountStatus" class="muted">Проверяем подключение к Telegram…</p><label><input type="checkbox" id="notifyToggle" style="display:inline;width:auto"> 🔔 Уведомлять об изменениях</label><p><button class="btn" type="button" id="saveProfile">Сохранить выбранное расписание в боте</button></p></div>
+  <div id="accountPanel" class="panel hidden"><h2>👤 Мой профиль</h2><p id="roleProfile" class="muted"></p><button id="changeRole" class="btn secondary" type="button">Сменить роль</button><p id="accountStatus" class="muted">Проверяем подключение к Telegram…</p><label><input type="checkbox" id="notifyToggle" style="display:inline;width:auto"> 🔔 Уведомлять об изменениях</label><p><button class="btn" type="button" id="saveProfile">Сохранить выбранное расписание в боте</button></p></div>
   <div id="newsPanel" class="panel hidden"><h2>Новости колледжа</h2><div id="newsContent" class="muted">Загрузка…</div></div>
   <div id="helpPanel" class="panel hidden"><div class="pulse-tag">ОБРАТНАЯ СВЯЗЬ</div><h2>Обращение в колледж</h2><p class="muted">Предложения, проблемы с расписанием или вопросы по работе сервиса. Сообщение попадёт в систему обращений.</p><textarea id="feedbackMessage" class="feedback-area" maxlength="2000" placeholder="Опиши вопрос или предложение..."></textarea><button type="button" class="btn" id="sendFeedback">Отправить обращение</button><p id="feedbackStatus" class="muted" aria-live="polite"></p><p class="muted">Расписание предоставляется сайтом rktm.info. Ответы ИИ появятся после подключения проверенной базы знаний.</p></div>
   <div class="panel" id="favoritePanel" style="display:none;margin-bottom:12px">
@@ -255,32 +291,7 @@ body,html{background:var(--bg)}
 <div class="footer">Источник данных: rktm.info</div>
 </div>
 
-<script src="https://telegram.org/js/telegram-web-app.js">
-function activateView(tab){
-  const valid=['schedule','groups','news','profile'];
-  if(!valid.includes(tab))tab='schedule';
-  home.dataset.view=tab;
-  document.querySelectorAll('.quick-nav [data-tab]').forEach(b=>b.classList.toggle('active',b.dataset.tab===tab));
-  $('newsPanel').classList.toggle('hidden',tab!=='news');
-  $('accountPanel').classList.toggle('hidden',tab!=='profile');
-  $('helpPanel').classList.add('hidden');
-  $('emptyScheduleCTA').style.display=tab==='schedule'&&!readFavorite()?'block':'none';
-  if(tab==='news')loadNews();
-  if(tab==='schedule'&&readFavorite()){
-    const f=readFavorite();sourceSelect.value=f.source;openSchedule(f);
-  }else{
-    ++scheduleRequest;scheduleView.classList.add('hidden');home.classList.remove('hidden');
-  }
-  window.scrollTo({top:0,behavior:'smooth'});
-}
-document.querySelectorAll('.quick-nav [data-tab]').forEach(b=>{
-  const clone=b.cloneNode(true);b.replaceWith(clone);
-  clone.addEventListener('click',()=>activateView(clone.dataset.tab));
-});
-$('chooseGroup').addEventListener('click',()=>activateView('groups'));
-$('back').addEventListener('click',()=>activateView('groups'));
-activateView('schedule');
-</script>
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
 <script>
 "use strict";
 
@@ -853,6 +864,65 @@ $('copySubscribe').addEventListener('click',async()=>{
   try{await navigator.clipboard.writeText(command);$('copySubscribe').textContent='✓ Команда скопирована';}
   catch{$('copySubscribe').textContent=command;}
 });
+
+let currentRole=null;
+let chosenRole=null;
+function setRoleSelection(role){
+  chosenRole=role;
+  $('studentRole').classList.toggle('chosen',role==='student');
+  $('teacherRole').classList.toggle('chosen',role==='teacher');
+  $('roleCodeWrap').classList.toggle('hidden',role!=='teacher');
+  $('roleContinue').disabled=false;
+}
+$('studentRole').addEventListener('click',()=>setRoleSelection('student'));
+$('teacherRole').addEventListener('click',()=>setRoleSelection('teacher'));
+function applyRole(role){
+  currentRole=role;
+  $('onboarding').classList.add('hidden');
+  $('home').classList.remove('hidden');
+  $('roleBadge').textContent=role==='teacher'?'Преподаватель':'Студент';
+  $('roleProfile').textContent=role==='teacher'?'Преподаватель':'Студент';
+  const expected=role==='teacher'?'Praspisan':'raspisan';
+  const fav=readFavorite();
+  if(fav && fav.source!==expected){
+    localStorage.removeItem(FAVORITE_KEY);
+    currentItem=null;
+    updateFavoriteUI();
+  }
+  sourceSelect.value=expected;
+  sourceSelect.querySelectorAll('option').forEach(o=>o.hidden=o.value!==expected);
+  loadGroups();
+  activateView('schedule');
+}
+async function loadRole(){
+  try{
+    const result=await apiAccount('/api/me/role');
+    if(result.role)applyRole(result.role);
+    else{$('onboarding').classList.remove('hidden');$('home').classList.add('hidden');}
+  }catch(e){
+    $('onboarding').classList.remove('hidden');
+    $('home').classList.add('hidden');
+    $('roleStatus').textContent=e.message;
+  }
+}
+$('roleContinue').addEventListener('click',async()=>{
+  if(!chosenRole)return;
+  $('roleContinue').disabled=true;
+  $('roleStatus').textContent='';
+  try{
+    const data=await apiAccount('/api/me/role','POST',{role:chosenRole,code:$('roleCode').value});
+    applyRole(data.role);
+  }catch(e){$('roleStatus').textContent=e.message;}
+  finally{$('roleContinue').disabled=false;}
+});
+$('changeRole').addEventListener('click',()=>{
+  chosenRole=null;$('roleCode').value='';
+  $('roleContinue').disabled=true;
+  $('onboarding').classList.remove('hidden');
+  $('home').classList.add('hidden');
+  scheduleView.classList.add('hidden');
+});
+loadRole();
 </script>
 </body>
 </html>
