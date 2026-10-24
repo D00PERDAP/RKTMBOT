@@ -24,7 +24,7 @@ if not DB.is_file():
     parser.error("Database not found: " + str(DB))
 with sqlite3.connect(DB) as conn:
     tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-    for name in ("users", "bot_roles", "bot_states", "approved_teachers", "mini_roles", "feedback"):
+    for name in ("users", "bot_roles", "bot_states", "approved_teachers", "mini_roles", "feedback", "bot_accounts", "bot_favorites", "bot_pending"):
         if name in tables:
             count=conn.execute('SELECT COUNT(*) FROM "'+name+'"').fetchone()[0]
             conn.execute('DELETE FROM "'+name+'"')

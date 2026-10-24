@@ -6,17 +6,17 @@ from bs4 import BeautifulSoup
 
 CSS = """
 *{box-sizing:border-box}body{margin:0;background:#07111f;color:#eef5ff;font-family:Arial,'DejaVu Sans',sans-serif}
-.page{width:1080px;padding:62px 58px 74px;background:radial-gradient(circle at 92% 0%,#213b66 0,transparent 40%),linear-gradient(160deg,#081525,#0e2034)}
+.page{width:760px;padding:36px 34px 42px;background:radial-gradient(circle at 92% 0%,#213b66 0,transparent 40%),linear-gradient(160deg,#081525,#0e2034)}
 .brand{display:flex;justify-content:space-between;align-items:center;gap:12px}
-.pill{background:#2d65e9;color:white;border-radius:24px;padding:14px 23px;font-size:21px;font-weight:800;letter-spacing:1px}
+.pill{background:#2d65e9;color:white;border-radius:24px;padding:10px 16px;font-size:15px;font-weight:800;letter-spacing:1px}
 .pill.red{background:#d94362}
-h1{font-size:58px;line-height:1.16;overflow-wrap:anywhere;margin:46px 0 12px;font-weight:850}
-.subtitle{font-size:23px;color:#a9bfd8;margin:0 0 34px}
-.card{background:#152a43;border:1px solid #284361;border-radius:21px;margin:12px 0;padding:22px 25px;display:flex;gap:21px;align-items:flex-start}
-.num{background:#2c5fe0;border-radius:13px;min-width:52px;text-align:center;padding:12px 0;font-size:24px;font-weight:800}
-.content{flex:1;min-width:0;font-size:27px;line-height:1.4;overflow-wrap:anywhere;white-space:pre-wrap}
+h1{font-size:38px;line-height:1.16;overflow-wrap:anywhere;margin:28px 0 10px;font-weight:850}
+.subtitle{font-size:17px;color:#a9bfd8;margin:0 0 22px}
+.card{background:#152a43;border:1px solid #284361;border-radius:17px;margin:10px 0;padding:15px 18px;display:flex;gap:21px;align-items:flex-start}
+.num{background:#2c5fe0;border-radius:13px;min-width:42px;text-align:center;padding:9px 0;font-size:18px;font-weight:800}
+.content{flex:1;min-width:0;font-size:19px;line-height:1.35;overflow-wrap:anywhere;white-space:pre-wrap}
 .content span{display:block}.content span+span{color:#c0d0e4;margin-top:5px}
-.footer{display:flex;justify-content:space-between;border-top:1px solid #30445c;margin-top:38px;padding-top:24px;font-size:19px;color:#9fb4cd}
+.footer{display:flex;justify-content:space-between;border-top:1px solid #30445c;margin-top:24px;padding-top:16px;font-size:14px;color:#9fb4cd}
 """
 def extract_rows(html: str):
     soup=BeautifulSoup(html,"html.parser")
@@ -53,7 +53,7 @@ async def render_schedule_pages(name: str, html: str) -> list[bytes]:
     budget=0
     for idx,cells in enumerate(rows,1):
         cost=max(1,sum(len(x) for x in cells)//70+1)
-        if batch and (len(batch)>=12 or budget+cost>22):
+        if batch and (len(batch)>=5 or budget+cost>9):
             batches.append(batch)
             batch=[]
             budget=0
@@ -65,11 +65,91 @@ async def render_schedule_pages(name: str, html: str) -> list[bytes]:
     async with async_playwright() as p:
         browser=await p.chromium.launch(headless=True,args=["--no-sandbox"])
         try:
-            page=await browser.new_page(viewport={"width":1080,"height":800},device_scale_factor=1)
+            page=await browser.new_page(viewport={"width":760,"height":800},device_scale_factor=1)
             for n,batch in enumerate(batches,1):
                 await page.set_content(html_page(name,batch,n,len(batches)),wait_until="load")
                 image=await page.locator(".page").screenshot(type="png",animations="disabled",timeout=20000)
                 result.append(image)
+        finally:
+            await browser.close()
+    return result
+
+DAYS = ("Понедельник","Вторник","Среда","Четверг","Пятница","Суббота")
+DAY_SHORT = ("Пн","Вт","Ср","Чт","Пт","Сб")
+DAY_PATTERN = __import__("re").compile(r"(?<![А-Яа-я])(?:понедельник|вторник|среда|четверг|пятница|суббота)(?![А-Яа-я])",__import__("re").I)
+
+def split_by_days(html: str):
+    """Keep all rows and group them under explicit weekday headings in source HTML.
+
+    A heading may appear in a table cell or outside the table. Do not assign
+    unknown lessons to a guessed day.
+    """
+    soup=BeautifulSoup(html,"html.parser")
+    for node in soup(["script","style","nav","footer"]):
+        node.decompose()
+    result={day:[] for day in DAYS}
+    current=None
+    recognized=False
+    # Walk in document order; table rows are handled as units to avoid duplicates.
+    for element in soup.find_all(["tr","h1","h2","h3","h4","strong","b","p"]):
+        if element.name!="tr" and element.find_parent("tr"):
+            continue
+        if element.name!="tr" and element.find(["tr","table"]):
+            continue
+        if element.name=="tr":
+            cells=[" ".join(c.get_text(" ",strip=True).split()) for c in element.find_all(["th","td"],recursive=False)]
+            cells=[c for c in cells if c]
+            if not cells:
+                continue
+            # Weekday headers must be standalone or short date labels, not text inside a subject.
+            match=DAY_PATTERN.search(cells[0])
+            header=(match and len(cells[0])<=42 and (len(cells)==1 or all(not x.strip() for x in cells[1:])))
+            if header:
+                current=DAYS[[x.lower() for x in DAYS].index(match.group(0).lower())]
+                recognized=True
+                continue
+            if current:
+                result[current].append(cells)
+        else:
+            value=" ".join(element.get_text(" ",strip=True).split())
+            match=DAY_PATTERN.search(value)
+            if match and len(value)<=42:
+                current=DAYS[[x.lower() for x in DAYS].index(match.group(0).lower())]
+                recognized=True
+    return result if recognized else None
+
+async def render_day_pages(name: str, html: str, day_index: int):
+    if not 0<=day_index<len(DAYS):
+        raise ValueError("Invalid weekday")
+    grouped=split_by_days(html)
+    if grouped is None:
+        return None
+    rows=grouped[DAYS[day_index]] or [["На этот день пары не указаны"]]
+    return await render_rows_pages(name+" · "+DAYS[day_index], rows)
+
+async def render_rows_pages(name: str, rows: list[list[str]]) -> list[bytes]:
+    from playwright.async_api import async_playwright
+    batches=[]
+    batch=[]
+    budget=0
+    for idx,cells in enumerate(rows,1):
+        cost=max(1,sum(len(x) for x in cells)//70+1)
+        if batch and (len(batch)>=5 or budget+cost>9):
+            batches.append(batch)
+            batch=[]
+            budget=0
+        batch.append((idx,cells))
+        budget+=cost
+    if batch:
+        batches.append(batch)
+    result=[]
+    async with async_playwright() as p:
+        browser=await p.chromium.launch(headless=True,args=["--no-sandbox"])
+        try:
+            page=await browser.new_page(viewport={"width":760,"height":800},device_scale_factor=1)
+            for n,batch in enumerate(batches,1):
+                await page.set_content(html_page(name,batch,n,len(batches)),wait_until="load")
+                result.append(await page.locator(".page").screenshot(type="png",animations="disabled",timeout=20000))
         finally:
             await browser.close()
     return result
