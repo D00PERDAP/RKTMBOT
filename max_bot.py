@@ -108,7 +108,11 @@ async def catalog(client, uid, source, page=0):
     await send(client, uid, f"{title} — страница {page+1}/{(len(items)+9)//10}\n"
                + "\n".join(rows)
                + "\n\nОтправь номер для выбора, /next или /prev для страниц."
-               + "\n/groups — группы, /teachers — преподаватели.")
+               + "\nВыбери расписание кнопкой:",
+               kb([[(f"{page*10+i+1}. {item['name']}"[:60], f"/pick {i+1}")] for i,item in enumerate(items[page*10:page*10+10])]
+                  + [[("◀️", "/prev"), ("▶️", "/next")],
+                     [("🎓 Группы", "/groups"), ("👨‍🏫 Преподаватели", "/teachers")],
+                     [("🏠 Главное меню", "/start")]]))
 
 
 async def choose(client, uid, number):
@@ -150,17 +154,19 @@ async def show_schedule(client, uid, day=None):
             return
         schedule = await fetch_html(urljoin(SCHEDULE_BASE, p["filename"]))
         text = "\n\n".join(clean_html(part) for part in schedule_text_parts(p["title"], schedule, day))
-    await send(client, uid, text + "\n\n/day 0..5 — выбрать день; /today — сегодня; /save — в избранное.")
+    await send(client, uid, text + "\n\nВыбери день:",
+               kb([[("Пн", "/day 0"), ("Вт", "/day 1"), ("Ср", "/day 2")],
+                   [("Чт", "/day 3"), ("Пт", "/day 4"), ("Сб", "/day 5")],
+                   [("📅 Сегодня", "/today"), ("⭐ Сохранить", "/save")],
+                   [("🔎 Все расписания", "/browse"), ("🏠 Меню", "/start")]]))
 
 
 async def handle(client, uid, text):
     text = (text or "").strip()
     command = text.lower().split()[0] if text else ""
     if command in ("/start", "/help", "меню"):
-        await send(client, uid, "РКТМ — расписание\n\n/groups — группы\n/teachers — преподаватели"
-                   "\n/today — моё расписание сегодня\n/day 0 — понедельник (до 5 — суббота)"
-                   "\n/save — сохранить в избранное\n/favorites — избранное"
-                   "\n/news — новости\n/profile — профиль")
+        await send(client, uid, "📚 РКТМ | Главное меню\n\nВыбери нужный раздел 👇",
+                   home_buttons())
     elif command == "/browse":
         await send(client, uid, "🔎 Все расписания\\nВыбери категорию:",
                    kb([[("🎓 Группы", "/groups")],
@@ -205,10 +211,10 @@ async def handle(client, uid, text):
     elif command == "/favorites":
         with db() as conn:
             items = conn.execute("SELECT title FROM max_favorites WHERE uid=? ORDER BY title", (uid,)).fetchall()
-        await send(client, uid, "Избранное:\n" + ("\n".join(x["title"] for x in items) if items else "Пока пусто."))
+        await send(client, uid, "⭐ Избранное:\n" + ("\n".join(x["title"] for x in items) if items else "Пока пусто."), home_buttons())
     elif command == "/news":
         posts = news_list()[:5]
-        await send(client, uid, "\n\n".join(x["title"] + "\n" + x["body"] for x in posts) if posts else "Новостей пока нет.")
+        await send(client, uid, "\n\n".join(x["title"] + "\n" + x["body"] for x in posts) if posts else "Новостей пока нет.", home_buttons())
     elif text.isdigit():
         await choose(client, uid, int(text))
     else:
@@ -238,6 +244,18 @@ async def run():
                         msg = update.get("message") or {}
                         uid = str((msg.get("sender") or {}).get("user_id", ""))
                         message = (msg.get("body") or {}).get("text", "")
+                    elif kind == "message_callback":
+                        callback = update.get("callback") or {}
+                        uid = str((callback.get("user") or {}).get("user_id", ""))
+                        message = callback.get("payload", "")
+                        callback_id = callback.get("callback_id")
+                        if callback_id:
+                            try:
+                                ack = await client.post("/answers", params={"callback_id": callback_id},
+                                                        json={}, timeout=15)
+                                ack.raise_for_status()
+                            except httpx.HTTPError:
+                                log.exception("Callback acknowledgement failed")
                     else:
                         continue
                     if uid and uid != "None":
