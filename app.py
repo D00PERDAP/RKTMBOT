@@ -60,6 +60,8 @@ SCHEDULE_URLS = {
 
 bot = Bot(token=BOT_TOKEN) if BOT_TOKEN else None
 dp = Dispatcher()
+from bot_flow import router as bot_only_router, setup as setup_bot_only
+dp.include_router(bot_only_router)
 
 
 class GroupParser(HTMLParser):
@@ -103,8 +105,6 @@ def main_keyboard():
         [KeyboardButton(text="📅 Расписание"), KeyboardButton(text="👥 Моя группа")],
         [KeyboardButton(text="🔔 Изменения"), KeyboardButton(text="⚙️ Настройки")],
     ]
-    if WEBAPP_URL.startswith("https://"):
-        rows.append([KeyboardButton(text="📱 Открыть приложение", web_app=WebAppInfo(url=WEBAPP_URL))])
     return ReplyKeyboardMarkup(keyboard=rows, resize_keyboard=True, is_persistent=True)
 
 
@@ -167,12 +167,14 @@ async def settings_menu(message: Message):
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     initialize()
+    setup_bot_only()
     if bot:
         try:
             await bot.set_my_commands([
-                BotCommand(command="start", description="Главное меню"),
-                BotCommand(command="schedule", description="Расписание"),
-                BotCommand(command="profile", description="Моя группа"),
+                BotCommand(command="start", description="Регистрация и меню"),
+                BotCommand(command="schedule", description="Расписание картинкой"),
+                BotCommand(command="admin", description="Админ-панель"),
+                BotCommand(command="profile", description="Мой профиль"),
                 BotCommand(command="notify", description="Включить уведомления"),
                 BotCommand(command="mute", description="Выключить уведомления"),
                 BotCommand(command="help", description="Помощь"),
