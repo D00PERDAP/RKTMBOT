@@ -395,6 +395,13 @@ async def schedule_image(message, source, filename, title, day=None, item_id=Non
         else:
             html = await fetch_html(urljoin(SCHEDULE_BASE, filename))
             parts = schedule_text_parts(title, html, day)
+        from substitutions import substitutions_for, format_group_changes
+        from datetime import timedelta
+        local_today = datetime.now(ZoneInfo(SCHEDULE_TIMEZONE)).date()
+        target_date = (local_today + timedelta(days=(day - local_today.weekday()) % 7)).isoformat()
+        changes = substitutions_for(title, target_date) if source == "raspisan" else []
+        if changes:
+            parts.append("<b>🔄 Замены</b>\n" + escape(format_group_changes(changes, title, target_date)))
         content = "\n\n".join(parts)
         if len(content) > 4000:
             content = parts[0] if len(parts[0]) <= 4000 else parts[0][:3500] + "…"
