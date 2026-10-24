@@ -21,7 +21,11 @@ def group_key(name):
     """Match official short group codes against full catalog labels."""
     value = re.sub(r"\s+", "", name or "").upper().replace("Ё", "Е")
     match = GROUP_RE.search(value)
-    return (match.group(1).replace("Ё", "Е"), match.group(2)) if match else None
+    if not match:
+        return None
+    # Catalog names include training year: АТ09.29-15 -> АТ-15.
+    suffix = re.search(r"[-–](\d{2})$", value)
+    return (match.group(1).replace("Ё", "Е"), suffix.group(1) if suffix else match.group(2))
 
 
 def document_date(value):
@@ -204,9 +208,10 @@ async def notify_changed(days, telegram_bot=None):
     with db() as conn:
         users = [dict(r) for r in conn.execute(
             "SELECT platform,user_id,group_name FROM users WHERE notifications=1 AND group_name != ''")]
+        has_max = conn.execute("SELECT 1 FROM sqlite_master WHERE name='max_profiles'").fetchone()
         max_users = [dict(r) for r in conn.execute(
             "SELECT uid AS user_id,title AS group_name,'max' AS platform "
-            "FROM max_profiles WHERE filename IS NOT NULL AND role='student'")]
+            "FROM max_profiles WHERE filename IS NOT NULL AND role='student'")] if has_max else []
     users += max_users
     for day in days:
         for person in users:
