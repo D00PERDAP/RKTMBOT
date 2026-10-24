@@ -39,7 +39,12 @@ def setup():
             filename TEXT NOT NULL, title TEXT NOT NULL,
             UNIQUE(uid,source,filename)
         );
-        CREATE TABLE IF NOT EXISTS bot_catalog_items(\n            id INTEGER PRIMARY KEY AUTOINCREMENT,\n            source TEXT NOT NULL, filename TEXT NOT NULL, title TEXT NOT NULL,\n            UNIQUE(source,filename)\n        );\n        CREATE TABLE IF NOT EXISTS bot_pending(
+        CREATE TABLE IF NOT EXISTS bot_catalog_items(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            source TEXT NOT NULL, filename TEXT NOT NULL, title TEXT NOT NULL,
+            UNIQUE(source,filename)
+        );
+        CREATE TABLE IF NOT EXISTS bot_pending(
             uid TEXT PRIMARY KEY, role TEXT NOT NULL,
             display_name TEXT NOT NULL DEFAULT '',
             password_hash TEXT NOT NULL DEFAULT '',
