@@ -73,3 +73,83 @@ async def render_schedule_pages(name: str, html: str) -> list[bytes]:
         finally:
             await browser.close()
     return result
+
+DAYS = ("Понедельник","Вторник","Среда","Четверг","Пятница","Суббота")
+DAY_SHORT = ("Пн","Вт","Ср","Чт","Пт","Сб")
+DAY_PATTERN = __import__("re").compile(r"(?<![А-Яа-я])(?:понедельник|вторник|среда|четверг|пятница|суббота)(?![А-Яа-я])",__import__("re").I)
+
+def split_by_days(html: str):
+    """Keep all rows and group them under explicit weekday headings in source HTML.
+
+    A heading may appear in a table cell or outside the table. Do not assign
+    unknown lessons to a guessed day.
+    """
+    soup=BeautifulSoup(html,"html.parser")
+    for node in soup(["script","style","nav","footer"]):
+        node.decompose()
+    result={day:[] for day in DAYS}
+    current=None
+    recognized=False
+    # Walk in document order; table rows are handled as units to avoid duplicates.
+    for element in soup.find_all(["tr","h1","h2","h3","h4","strong","b","p"]):
+        if element.name!="tr" and element.find_parent("tr"):
+            continue
+        if element.name!="tr" and element.find(["tr","table"]):
+            continue
+        if element.name=="tr":
+            cells=[" ".join(c.get_text(" ",strip=True).split()) for c in element.find_all(["th","td"],recursive=False)]
+            cells=[c for c in cells if c]
+            if not cells:
+                continue
+            # Weekday headers must be standalone or short date labels, not text inside a subject.
+            match=DAY_PATTERN.search(cells[0])
+            header=(match and len(cells[0])<=42 and (len(cells)==1 or all(not x.strip() for x in cells[1:])))
+            if header:
+                current=DAYS[[x.lower() for x in DAYS].index(match.group(0).lower())]
+                recognized=True
+                continue
+            if current:
+                result[current].append(cells)
+        else:
+            value=" ".join(element.get_text(" ",strip=True).split())
+            match=DAY_PATTERN.search(value)
+            if match and len(value)<=42:
+                current=DAYS[[x.lower() for x in DAYS].index(match.group(0).lower())]
+                recognized=True
+    return result if recognized else None
+
+async def render_day_pages(name: str, html: str, day_index: int):
+    if not 0<=day_index<len(DAYS):
+        raise ValueError("Invalid weekday")
+    grouped=split_by_days(html)
+    if grouped is None:
+        return None
+    rows=grouped[DAYS[day_index]] or [["На этот день пары не указаны"]]
+    return await render_rows_pages(name+" · "+DAYS[day_index], rows)
+
+async def render_rows_pages(name: str, rows: list[list[str]]) -> list[bytes]:
+    from playwright.async_api import async_playwright
+    batches=[]
+    batch=[]
+    budget=0
+    for idx,cells in enumerate(rows,1):
+        cost=max(1,sum(len(x) for x in cells)//70+1)
+        if batch and (len(batch)>=5 or budget+cost>9):
+            batches.append(batch)
+            batch=[]
+            budget=0
+        batch.append((idx,cells))
+        budget+=cost
+    if batch:
+        batches.append(batch)
+    result=[]
+    async with async_playwright() as p:
+        browser=await p.chromium.launch(headless=True,args=["--no-sandbox"])
+        try:
+            page=await browser.new_page(viewport={"width":760,"height":800},device_scale_factor=1)
+            for n,batch in enumerate(batches,1):
+                await page.set_content(html_page(name,batch,n,len(batches)),wait_until="load")
+                result.append(await page.locator(".page").screenshot(type="png",animations="disabled",timeout=20000))
+        finally:
+            await browser.close()
+    return result
