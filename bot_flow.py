@@ -55,15 +55,19 @@ def buttons(rows):
         [InlineKeyboardButton(text=label,callback_data=data) for label,data in row] for row in rows
     ])
 
-def bottom_menu():
-    return ReplyKeyboardMarkup(keyboard=[
-        [KeyboardButton(text="🖼 Моё расписание"), KeyboardButton(text="📚 Выбрать расписание")],
-        [KeyboardButton(text="👤 Профиль"), KeyboardButton(text="🔐 Админ-панель")],
-    ],resize_keyboard=True,is_persistent=True)
+def bottom_menu(uid=None):
+    rows = [
+        [KeyboardButton(text="📅 Моё расписание")],
+        [KeyboardButton(text="📚 Выбрать расписание"), KeyboardButton(text="👤 Профиль")],
+        [KeyboardButton(text="🔔 Уведомления"), KeyboardButton(text="📰 Новости")],
+    ]
+    if uid is not None and str(uid) in ADMIN_IDS:
+        rows.append([KeyboardButton(text="🔐 Админ-панель")])
+    return ReplyKeyboardMarkup(keyboard=rows,resize_keyboard=True,is_persistent=True)
 
 def menu():
     return buttons([
-        [("🖼 Моё расписание","b:schedule")],
+        [("📅 Моё расписание","b:schedule")],
         [("📚 Выбрать расписание","b:choose")],
         [("👤 Профиль","b:profile"),("📰 Новости","b:news")],
     ])
@@ -77,7 +81,7 @@ async def start(message:Message):
             [("🎓 Студент","b:student"),("👨‍🏫 Преподаватель","b:teacher")]
         ]))
     else:
-        await message.answer("РКТМ · Главное меню",reply_markup=bottom_menu())
+        await message.answer("РКТМ · Главное меню",reply_markup=bottom_menu(uid))
 
 @router.callback_query(F.data.startswith("b:"))
 async def actions(call:CallbackQuery):
@@ -86,11 +90,11 @@ async def actions(call:CallbackQuery):
     action=call.data[2:]
     if action=="student":
         set_role(uid,"student")
-        await call.message.answer("🎓 Регистрация завершена.",reply_markup=bottom_menu())
+        await call.message.answer("🎓 Регистрация завершена.",reply_markup=bottom_menu(uid))
     elif action=="teacher":
         if approved(uid):
             set_role(uid,"teacher")
-            await call.message.answer("👨‍🏫 Доступ преподавателя подтверждён.",reply_markup=bottom_menu())
+            await call.message.answer("👨‍🏫 Доступ преподавателя подтверждён.",reply_markup=bottom_menu(uid))
         else:
             set_state(uid,"teacher_code")
             await call.message.answer("Отправь кодовое слово преподавателя одним сообщением.")
@@ -106,16 +110,18 @@ async def actions(call:CallbackQuery):
         await call.message.answer(
             "👤 Роль: "+("Преподаватель" if role(uid)=="teacher" else "Студент" if role(uid)=="student" else "Не зарегистрирован")
             +"\nРасписание: "+(profile["group_name"] if profile and profile["filename"] else "не выбрано")
-            +"\nСменить роль: /startrole",reply_markup=bottom_menu())
+            +"\nСменить роль: /startrole",reply_markup=bottom_menu(uid))
     elif action=="news":
         from features import news_list
         items=news_list()[:3]
         await call.message.answer("\n\n".join(x["title"]+"\n"+x["body"][:350] for x in items) if items else "Новостей пока нет.")
     elif action.startswith("page:"):
-        await choose(call.message,uid,int(action.split(":")[1]))
+        if role(uid) and action[5:].isdigit():
+            await choose(call.message,uid,int(action[5:]))
     elif action.startswith("pick:"):
-        _,page,idx=action.split(":")
-        await pick(call.message,uid,int(page),int(idx))
+        parts=action.split(":")
+        if role(uid) and len(parts)==3 and parts[1].isdigit() and parts[2].isdigit():
+            await pick(call.message,uid,int(parts[1]),int(parts[2]))
 
 @router.message(Command("startrole"))
 async def change_role(message:Message):
@@ -151,7 +157,7 @@ async def pick(message,uid,page,idx):
         if idx<0 or idx>=8 or pos>=len(items):raise ValueError()
         item=items[pos]
         save_user("telegram",uid,source,item["file"],item["name"],True)
-        await message.answer("✅ Сохранено: "+item["name"],reply_markup=bottom_menu())
+        await message.answer("✅ Сохранено: "+item["name"],reply_markup=bottom_menu(uid))
         await send_schedule(message,uid)
     except Exception:
         await message.answer("Не удалось сохранить выбор. Попробуй ещё раз.")
@@ -228,7 +234,8 @@ async def my_id(message:Message):
 async def profile(message:Message):
     uid=str(message.from_user.id)
     p=user("telegram",uid)
-    await message.answer("Роль: "+str(role(uid) or "не выбрана")+"\\nРасписание: "+(p["group_name"] if p and p["filename"] else "не выбрано"),reply_markup=bottom_menu())
+    label={"teacher":"👨‍🏫 Преподаватель","student":"🎓 Студент"}.get(role(uid),"Не зарегистрирован")
+    await message.answer("👤 Профиль\nРоль: "+label+"\\nРасписание: "+(p["group_name"] if p and p["filename"] else "не выбрано")+"\\n\\nСменить роль: /startrole",reply_markup=bottom_menu(uid))
 
 @router.message(Command("admin"))
 async def admin(message:Message):
@@ -269,17 +276,27 @@ async def text_input(message:Message):
         set_state(uid,None)
         if hmac.compare_digest((message.text or "").strip().encode(),TEACHER_CODE.encode()):
             set_role(uid,"teacher")
-            await message.answer("👨‍🏫 Регистрация преподавателя завершена.",reply_markup=bottom_menu())
+            await message.answer("👨‍🏫 Регистрация преподавателя завершена.",reply_markup=bottom_menu(uid))
         else:
             await message.answer("Неверное кодовое слово. Повтори через /startrole.")
         return
-    if message.text in ("📅 Расписание","🖼 Моё расписание"):
+    if message.text in ("📅 Расписание","🖼 Моё расписание","📅 Моё расписание"):
         await send_schedule(message,uid)
     elif message.text in ("👥 Моя группа","📚 Выбрать расписание"):
         await choose(message,uid)
+    elif message.text=="🔔 Уведомления":
+        p=user("telegram",uid)
+        if not p or not p["filename"]:
+            await message.answer("Сначала выбери расписание.",reply_markup=buttons([[("📚 Выбрать","b:choose")]]))
+        else:
+            await message.answer("🔔 Уведомления "+("включены" if p["notifications"] else "выключены")+"\\n/notify — включить\\n/mute — выключить")
+    elif message.text=="📰 Новости":
+        from features import news_list
+        items=news_list()[:3]
+        await message.answer("\\n\\n".join(x["title"]+"\\n"+x["body"][:350] for x in items) if items else "Новостей пока нет.")
     elif message.text=="👤 Профиль":
         await profile(message)
     elif message.text=="🔐 Админ-панель":
         await admin(message)
     else:
-        await message.answer("Выбери действие:",reply_markup=bottom_menu())
+        await message.answer("Выбери действие:",reply_markup=bottom_menu(uid))
