@@ -182,7 +182,7 @@ def day_keyboard(item_id,selected):
 async def schedule_image(message, source, filename, title, day=None, item_id=None):
     from app import fetch_html, SCHEDULE_BASE
     from schedule_browser import render_schedule_pages, render_day_pages, DAYS
-    if source not in SOURCES.values() or not re.fullmatch(r"[^/\\\\?#]+\\.html?", filename, re.I):
+    if source not in SOURCES.values() or not re.fullmatch(r"[^/\\?#]+\.html?", filename, re.I):
         await message.answer("Некорректное расписание.")
         return
     try:
