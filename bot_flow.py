@@ -131,8 +131,9 @@ def buttons(rows):
 def keyboard(uid):
     rows = [
         [KeyboardButton(text="📅 Моё расписание"), KeyboardButton(text="🔎 Все расписания")],
-        [KeyboardButton(text="⭐ Избранное"), KeyboardButton(text="👤 Профиль")],
-        [KeyboardButton(text="🔔 Уведомления"), KeyboardButton(text="📰 Новости")],
+        [KeyboardButton(text="🔄 Замены"), KeyboardButton(text="⭐ Избранное")],
+        [KeyboardButton(text="👤 Профиль"), KeyboardButton(text="🔔 Уведомления")],
+        [KeyboardButton(text="📰 Новости")],
     ]
     if str(uid) in ADMIN_IDS:
         rows.append([KeyboardButton(text="🔐 Админ-панель")])
@@ -567,6 +568,26 @@ async def personal(message: Message):
     await schedule_image(message,p["source"],p["filename"],p["group_name"])
 
 
+@router.message(Command("substitutions"))
+async def personal_substitutions(message: Message):
+    from substitutions import substitutions_for, format_group_changes
+    from datetime import timedelta
+    uid = str(message.from_user.id)
+    p = user("telegram", uid)
+    if not p or not p["filename"]:
+        await show_screen(message, "Сначала выбери свою группу через /start.")
+        return
+    today = datetime.now(ZoneInfo(SCHEDULE_TIMEZONE)).date()
+    messages = []
+    for delta in range(0, 8):
+        date = (today + timedelta(days=delta)).isoformat()
+        rows = substitutions_for(p["group_name"], date) if p["source"] == "raspisan" else []
+        if rows:
+            messages.append(format_group_changes(rows, p["group_name"], date))
+    await show_screen(message, "\n\n".join(messages)[:3900] if messages else
+                      "🔄 Для твоей группы пока нет опубликованных замен на ближайшие дни.")
+
+
 @router.message(Command("id"))
 async def telegram_id(message: Message):
     await message.answer("Telegram ID: "+str(message.from_user.id))
@@ -648,7 +669,7 @@ async def text_handler(message: Message):
         else:
             await message.answer("Неверный код. Попробуй ещё раз или /register.")
         return
-    if text in ("📅 Моё расписание", "📅 Расписание", "🔎 Все расписания", "📚 Выбрать расписание", "⭐ Избранное", "👤 Профиль", "🔐 Админ-панель", "🔔 Уведомления", "📰 Новости"):
+    if text in ("📅 Моё расписание", "📅 Расписание", "🔎 Все расписания", "📚 Выбрать расписание", "⭐ Избранное", "👤 Профиль", "🔐 Админ-панель", "🔔 Уведомления", "📰 Новости", "🔄 Замены"):
         try:
             await message.delete()
         except Exception:
@@ -666,6 +687,8 @@ async def text_handler(message: Message):
         await profile(message)
     elif text=="🔐 Админ-панель":
         await admin(message)
+    elif text=="🔄 Замены":
+        await personal_substitutions(message)
     elif text=="🔔 Уведомления":
         await show_screen(message,"🔔 /notify — включить, /mute — выключить.")
     elif text=="📰 Новости":
