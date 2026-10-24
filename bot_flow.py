@@ -6,6 +6,8 @@ import logging
 import os
 import re
 import secrets
+from datetime import datetime
+from zoneinfo import ZoneInfo
 from urllib.parse import urljoin
 
 from aiogram import F, Router
@@ -17,6 +19,12 @@ from aiogram.types import (
 from features import db, save_user, user
 
 router = Router()
+SCHEDULE_TIMEZONE = os.getenv("SCHEDULE_TIMEZONE", "Europe/Moscow")
+_LAST_SCHEDULE_MESSAGES = {}
+
+
+def today_schedule_day():
+    return datetime.now(ZoneInfo(SCHEDULE_TIMEZONE)).weekday()
 log = logging.getLogger(__name__)
 TEACHER_CODE = os.getenv("TEACHER_ACCESS_CODE", "РКТМПРЕПОД2026")
 ADMIN_IDS = {x.strip() for x in os.getenv("ADMIN_TELEGRAM_IDS", "").split(",") if x.strip()}
@@ -176,7 +184,7 @@ def day_keyboard(item_id,selected):
     rows=[]
     for start in (0,3):
         rows.append([(("● " if i==selected else "")+DAY_SHORT[i],"day:"+str(item_id)+":"+str(i)) for i in range(start,start+3)])
-    rows.append([("📋 Всё расписание","all:"+str(item_id))])
+    rows.append([("📅 Сегодня","today:"+str(item_id))])
     return buttons(rows)
 
 
@@ -258,7 +266,7 @@ def schedule_text_parts(title, html, day=None):
             if not lessons:
                 text += "\nПар не указано."
             for slot, time_label, subject in lessons:
-                line = "\n\n<b>" + str(slot) + "-я пара"
+                line = "\n\n<b>" + str(slot) + "-й урок"
                 if time_label:
                     line += " · " + escape(time_label)
                 line += "</b>\n" + escape(subject)
@@ -270,21 +278,44 @@ def schedule_text_parts(title, html, day=None):
     return chunks or ["Расписание отсутствует."]
 
 
-async def schedule_image(message, source, filename, title, day=None, item_id=None):
+async def schedule_image(message, source, filename, title, day=None, item_id=None, edit=False):
     from app import fetch_html, SCHEDULE_BASE
     if source not in SOURCES.values() or not re.fullmatch(r"[^/\\?#]+\.html?", filename, re.I):
         await message.answer("Некорректное расписание.")
         return
     try:
-        html = await fetch_html(urljoin(SCHEDULE_BASE, filename))
         if item_id is None:
             with db() as c:
                 c.execute("INSERT INTO bot_catalog_items(source,filename,title) VALUES (?,?,?) ON CONFLICT(source,filename) DO UPDATE SET title=excluded.title",(source,filename,title))
                 item=c.execute("SELECT id FROM bot_catalog_items WHERE source=? AND filename=?",(source,filename)).fetchone()
                 item_id=item["id"]
-        parts = schedule_text_parts(title, html, day)
-        for i,part in enumerate(parts):
-            await message.answer(part, parse_mode="HTML", reply_markup=day_keyboard(item_id,day if day is not None else -1) if i==len(parts)-1 else None)
+        if day is None:
+            day = today_schedule_day()
+        if day == 6:
+            parts = ["📅 <b>" + escape(title) + " · Воскресенье</b>\n☀️ Сегодня выходной, уроков нет."]
+        else:
+            html = await fetch_html(urljoin(SCHEDULE_BASE, filename))
+            parts = schedule_text_parts(title, html, day)
+        content = "\n\n".join(parts)
+        if len(content) > 4000:
+            content = parts[0] if len(parts[0]) <= 4000 else parts[0][:3500] + "…"
+            content += "\n\n⚠️ Расписание слишком длинное для одного сообщения."
+        markup = day_keyboard(item_id, day if day < 6 else -1)
+        if edit:
+            try:
+                await message.edit_text(content, parse_mode="HTML", reply_markup=markup)
+                return
+            except Exception:
+                log.exception("Cannot edit schedule message; sending replacement")
+        uid = message.chat.id
+        previous = _LAST_SCHEDULE_MESSAGES.get(uid)
+        if previous:
+            try:
+                await message.bot.delete_message(uid, previous)
+            except Exception:
+                pass
+        sent = await message.answer(content, parse_mode="HTML", reply_markup=markup)
+        _LAST_SCHEDULE_MESSAGES[uid] = sent.message_id
     except Exception:
         log.exception("Schedule text failed")
         await message.answer("Не удалось загрузить расписание. Попробуй позже.")
@@ -315,7 +346,7 @@ async def show_favorites(message, uid):
     await message.answer("⭐ Избранное", reply_markup=buttons([[(r["title"][:48], "favorite:"+str(r["id"]))] for r in rows]))
 
 
-@router.callback_query(F.data.startswith(("reg:", "cat:", "view:", "browse", "addid:", "unfav:", "favorite:", "imgid:", "mineid:", "day:", "all:")))
+@router.callback_query(F.data.startswith(("reg:", "cat:", "view:", "browse", "addid:", "unfav:", "favorite:", "imgid:", "mineid:", "day:", "all:", "today:")))
 async def callback(call: CallbackQuery):
     await call.answer()
     uid = str(call.from_user.id)
@@ -365,8 +396,8 @@ async def callback(call: CallbackQuery):
             save_user("telegram",uid,source,filename,title,True)
             await call.message.answer("📌 Личное расписание: "+title,reply_markup=keyboard(uid))
         else:
-            await schedule_image(call.message,source,filename,title)
-    elif data.startswith(("day:", "all:")):
+            await schedule_image(call.message,source,filename,title,edit=True)
+    elif data.startswith(("day:", "all:", "today:")):
         parts=data.split(":")
         if len(parts)<2 or not parts[1].isdigit():
             return
@@ -378,10 +409,7 @@ async def callback(call: CallbackQuery):
         with db() as c:
             item=c.execute("SELECT * FROM bot_catalog_items WHERE id=?",(int(parts[1]),)).fetchone()
         if item:
-            if parts[0]=="all":
-                await schedule_image(call.message,item["source"],item["filename"],item["title"],None,item["id"])
-            else:
-                await schedule_image(call.message,item["source"],item["filename"],item["title"],day,item["id"])
+            await schedule_image(call.message,item["source"],item["filename"],item["title"],day,item["id"],edit=True)
     elif data.startswith(("favorite:", "unfav:")):
         command,_,id_text=data.partition(":")
         if not id_text.isdigit():
