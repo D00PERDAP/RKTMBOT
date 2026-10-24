@@ -59,7 +59,22 @@ def current_state(uid):
         return dict(row) if row else None
 
 
-async def send(client, user_id, text):
+def kb(rows):
+    return {"type": "inline_keyboard", "payload": {"buttons": [
+        [{"type": "callback", "text": title, "payload": action} for title, action in row]
+        for row in rows
+    ]}}
+
+
+def home_buttons():
+    return kb([
+        [("📅 Моё расписание", "/today"), ("🔎 Все расписания", "/browse")],
+        [("⭐ Избранное", "/favorites"), ("👤 Профиль", "/profile")],
+        [("📰 Новости", "/news"), ("🏠 Меню", "/start")],
+    ])
+
+
+async def send(client, user_id, text, keyboard=None):
     # MAX message size limit; split on line boundaries where possible.
     while text:
         chunk = text[:3500]
@@ -67,7 +82,7 @@ async def send(client, user_id, text):
             chunk = chunk[:chunk.rfind("\n")] or chunk
         response = await client.post(
             "/messages", params={"user_id": int(user_id)},
-            json={"text": chunk}, timeout=25,
+            json={"text": chunk, **({"attachments": [keyboard]} if keyboard and len(text) <= 3500 else {})}, timeout=25,
         )
         response.raise_for_status()
         text = text[len(chunk):].lstrip("\n")
@@ -146,6 +161,17 @@ async def handle(client, uid, text):
                    "\n/today — моё расписание сегодня\n/day 0 — понедельник (до 5 — суббота)"
                    "\n/save — сохранить в избранное\n/favorites — избранное"
                    "\n/news — новости\n/profile — профиль")
+    elif command == "/browse":
+        await send(client, uid, "🔎 Все расписания\\nВыбери категорию:",
+                   kb([[("🎓 Группы", "/groups")],
+                       [("👨‍🏫 Преподаватели", "/teachers")],
+                       [("🏠 Меню", "/start")]]))
+    elif command == "/pick":
+        parts = text.split()
+        if len(parts) == 2 and parts[1].isdigit():
+            await choose(client, uid, int(parts[1]))
+        else:
+            await send(client, uid, "Выбери расписание кнопкой.")
     elif command == "/groups":
         await catalog(client, uid, SOURCES["groups"])
     elif command == "/teachers":
@@ -166,7 +192,7 @@ async def handle(client, uid, text):
             await show_schedule(client, uid, int(parts[1]))
     elif command == "/profile":
         p = profile(uid)
-        await send(client, uid, "Твоё расписание: " + (p["title"] if p else "не выбрано"))
+        await send(client, uid, "👤 Профиль\\nТвоё расписание: " + (p["title"] if p else "не выбрано"), home_buttons())
     elif command == "/save":
         p = profile(uid)
         if not p:
@@ -175,7 +201,7 @@ async def handle(client, uid, text):
             with db() as conn:
                 conn.execute("INSERT OR IGNORE INTO max_favorites VALUES (?,?,?,?)",
                              (uid, p["source"], p["filename"], p["title"]))
-            await send(client, uid, "Добавлено в избранное.")
+            await send(client, uid, "⭐ Добавлено в избранное.", home_buttons())
     elif command == "/favorites":
         with db() as conn:
             items = conn.execute("SELECT title FROM max_favorites WHERE uid=? ORDER BY title", (uid,)).fetchall()
