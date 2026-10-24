@@ -22,16 +22,12 @@ from pydantic import BaseModel, Field
 from features import initialize, save_user, user, news_list, add_news, add_feedback, compare_snapshot, subscribers, admin_authorized
 from fastapi.responses import FileResponse, HTMLResponse
 from aiogram import Bot, Dispatcher
+from aiogram.types import MenuButtonCommands
 from aiogram.filters import CommandStart, Command
 from aiogram.types import (
     Message,
     BotCommand,
     Update,
-    ReplyKeyboardMarkup,
-    KeyboardButton,
-    WebAppInfo,
-    InlineKeyboardMarkup,
-    InlineKeyboardButton,
 )
 
 logging.basicConfig(level=logging.INFO)
@@ -100,76 +96,13 @@ class GroupParser(HTMLParser):
         self.parts = []
 
 
-def main_keyboard():
-    rows = [
-        [KeyboardButton(text="📅 Расписание"), KeyboardButton(text="👥 Моя группа")],
-        [KeyboardButton(text="🔔 Изменения"), KeyboardButton(text="⚙️ Настройки")],
-    ]
-    return ReplyKeyboardMarkup(keyboard=rows, resize_keyboard=True, is_persistent=True)
-
-
-@dp.message(CommandStart())
-async def start_command(message: Message):
-    await message.answer(
-        "РКТМ · Расписание колледжа\nВыбери действие 👇",
-        reply_markup=main_keyboard(),
-    )
-
-
-@dp.message(Command("schedule"))
-@dp.message(lambda m: m.text == "📅 Расписание")
-async def schedule_menu(message: Message):
-    current = user("telegram", str(message.from_user.id))
-    if current and current["filename"]:
-        text = f"📅 Твоя группа: {current['group_name']}\nОткрой расписание в приложении."
-    else:
-        text = "📅 Сначала выбери группу в приложении."
-    markup = InlineKeyboardMarkup(inline_keyboard=[[
-        InlineKeyboardButton(text="Открыть расписание", web_app=WebAppInfo(url=WEBAPP_URL))
-    ]]) if WEBAPP_URL.startswith("https://") else None
-    await message.answer(text, reply_markup=markup)
-
-
-@dp.message(lambda m: m.text == "👥 Моя группа")
-async def group_menu(message: Message):
-    current = user("telegram", str(message.from_user.id))
-    if current and current["filename"]:
-        await message.answer(f"👥 Группа: {current['group_name']}\nЧтобы изменить, открой приложение.")
-    else:
-        await message.answer("Группа пока не выбрана. Открой приложение и сохрани группу.")
-
-
-@dp.message(lambda m: m.text == "🔔 Изменения")
-async def changes_menu(message: Message):
-    current = user("telegram", str(message.from_user.id))
-    if not current or not current["filename"]:
-        await message.answer("Сначала выбери группу в приложении.")
-        return
-    state = "включены" if current["notifications"] else "выключены"
-    await message.answer(f"🔔 Уведомления для {current['group_name']}: {state}.\nВключить: /notify\nВыключить: /mute")
-
-
-@dp.message(Command("notify"))
-async def notify_command(message: Message):
-    current = user("telegram", str(message.from_user.id))
-    if not current or not current["filename"]:
-        await message.answer("Сначала выбери группу в приложении.")
-        return
-    save_user("telegram", str(message.from_user.id), current["source"], current["filename"], current["group_name"], True)
-    await message.answer("🔔 Уведомления включены.")
-
-
-@dp.message(lambda m: m.text == "⚙️ Настройки")
-async def settings_menu(message: Message):
-    await message.answer("⚙️ Настройки\n/profile — моя группа\n/notify — включить уведомления\n/mute — выключить уведомления\n/help — помощь")
-
-
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     initialize()
     setup_bot_only()
     if bot:
         try:
+            await bot.set_chat_menu_button(menu_button=MenuButtonCommands())
             await bot.set_my_commands([
                 BotCommand(command="start", description="Регистрация и меню"),
                 BotCommand(command="schedule", description="Расписание картинкой"),
