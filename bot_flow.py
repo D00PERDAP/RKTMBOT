@@ -214,6 +214,16 @@ async def send_schedule(message,uid):
 async def schedule_command(message:Message):
     await send_schedule(message,str(message.from_user.id))
 
+@router.message(Command("id"))
+async def my_id(message:Message):
+    await message.answer("Твой Telegram ID: "+str(message.from_user.id))
+
+@router.message(Command("profile"))
+async def profile(message:Message):
+    uid=str(message.from_user.id)
+    p=user("telegram",uid)
+    await message.answer("Роль: "+str(role(uid) or "не выбрана")+"\\nРасписание: "+(p["group_name"] if p and p["filename"] else "не выбрано"),reply_markup=menu())
+
 @router.message(Command("admin"))
 async def admin(message:Message):
     uid=str(message.from_user.id)
