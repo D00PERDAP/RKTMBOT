@@ -568,24 +568,61 @@ async def personal(message: Message):
     await schedule_image(message,p["source"],p["filename"],p["group_name"])
 
 
+def substitution_menu():
+    return buttons([[("👤 Мои замены", "subs:mine")],
+                    [("📆 Замены на день", "subs:dates")],
+                    [("🏠 Главное меню", "subs:home")]])
+
+
+def substitution_dates():
+    from datetime import timedelta
+    today = datetime.now(ZoneInfo(SCHEDULE_TIMEZONE)).date()
+    rows = [[((today + timedelta(days=i)).strftime("%d.%m (%a)"), f"subs:day:{i}")]
+            for i in range(8)]
+    rows.append([("⬅️ Назад", "subs:menu")])
+    return buttons(rows)
+
+
+@router.callback_query(F.data.startswith("subs:"))
+async def substitution_callback(call: CallbackQuery):
+    from datetime import timedelta
+    from substitutions import substitutions_for, format_group_changes, substitutions_on, format_day_changes
+    await call.answer()
+    action = call.data
+    uid = str(call.from_user.id)
+    if action == "subs:home":
+        await show_screen(call.message, "🏠 Главное меню", edit=True)
+        await call.message.answer("Выбери раздел 👇", reply_markup=keyboard(uid))
+    elif action == "subs:menu":
+        await show_screen(call.message, "🔄 Замены — выбери раздел:", edit=True, reply_markup=substitution_menu())
+    elif action == "subs:dates":
+        await show_screen(call.message, "📆 Выбери день:", edit=True, reply_markup=substitution_dates())
+    elif action == "subs:mine":
+        p = user("telegram", uid)
+        if not p or not p["filename"] or p["source"] != "raspisan":
+            content = "Сначала выбери свою группу через /start."
+        else:
+            today = datetime.now(ZoneInfo(SCHEDULE_TIMEZONE)).date()
+            messages = []
+            for delta in range(8):
+                date = (today + timedelta(days=delta)).isoformat()
+                changes = substitutions_for(p["group_name"], date)
+                if changes:
+                    messages.append(format_group_changes(changes, p["group_name"], date))
+            content = "\n\n".join(messages) if messages else "Для твоей группы пока нет опубликованных замен на ближайшие дни."
+        await show_screen(call.message, content[:3900], edit=True, reply_markup=substitution_menu())
+    elif action.startswith("subs:day:"):
+        offset = int(action.rsplit(":", 1)[1])
+        if offset not in range(8):
+            return
+        day = (datetime.now(ZoneInfo(SCHEDULE_TIMEZONE)).date() + timedelta(days=offset)).isoformat()
+        content = format_day_changes(substitutions_on(day), day)
+        await show_screen(call.message, content[:3900], edit=True, reply_markup=substitution_dates())
+
+
 @router.message(Command("substitutions"))
 async def personal_substitutions(message: Message):
-    from substitutions import substitutions_for, format_group_changes
-    from datetime import timedelta
-    uid = str(message.from_user.id)
-    p = user("telegram", uid)
-    if not p or not p["filename"]:
-        await show_screen(message, "Сначала выбери свою группу через /start.")
-        return
-    today = datetime.now(ZoneInfo(SCHEDULE_TIMEZONE)).date()
-    messages = []
-    for delta in range(0, 8):
-        date = (today + timedelta(days=delta)).isoformat()
-        rows = substitutions_for(p["group_name"], date) if p["source"] == "raspisan" else []
-        if rows:
-            messages.append(format_group_changes(rows, p["group_name"], date))
-    await show_screen(message, "\n\n".join(messages)[:3900] if messages else
-                      "🔄 Для твоей группы пока нет опубликованных замен на ближайшие дни.")
+    await show_screen(message, "🔄 Замены — выбери раздел:", reply_markup=substitution_menu())
 
 
 @router.message(Command("id"))
