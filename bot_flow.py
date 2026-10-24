@@ -186,7 +186,7 @@ def schedule_text_parts(title, html, day=None):
     from schedule_browser import DAYS, table_rows
     import re
 
-    day_re = re.compile(r"^\\s*(Пнд|Втр|Срд|Чтв|Птн|Сбт|Вск|Пн|Вт|Ср|Чт|Пт|Сб|Понедельник|Вторник|Среда|Четверг|Пятница|Суббота|Воскресенье)\\s*[,.: -]*(.*)$", re.I)
+    day_re = re.compile(r"^\s*(Пнд|Втр|Срд|Чтв|Птн|Сбт|Вск|Пн|Вт|Ср|Чт|Пт|Сб|Понедельник|Вторник|Среда|Четверг|Пятница|Суббота|Воскресенье)\s*[,.: -]*(.*)$", re.I)
     day_ids = {"пнд":0,"втр":1,"срд":2,"чтв":3,"птн":4,"сбт":5,"вск":6,
                "пн":0,"вт":1,"ср":2,"чт":3,"пт":4,"сб":5,
                "понедельник":0,"вторник":1,"среда":2,"четверг":3,
@@ -206,7 +206,7 @@ def schedule_text_parts(title, html, day=None):
             first = row[0].strip()
             if first.lower().startswith("время"):
                 for i,value in enumerate(row[1:],1):
-                    if re.search(r"\\d{1,2}:\\d{2}",value):
+                    if re.search(r"\d{1,2}:\d{2}",value):
                         times[i] = value
                 continue
             match = day_re.match(first)
