@@ -846,6 +846,7 @@ async function loadNews(){
 }
 document.querySelectorAll('[data-tab]').forEach(button=>button.addEventListener('click',()=>{
   const tab=button.dataset.tab;
+  activateView(tab);
   $('newsPanel').classList.toggle('hidden',tab!=='news');
   $('helpPanel').classList.toggle('hidden',tab!=='help');
   if(tab==='news')loadNews();
@@ -865,6 +866,23 @@ $('copySubscribe').addEventListener('click',async()=>{
   catch{$('copySubscribe').textContent=command;}
 });
 
+
+function activateView(tab){
+  if(!['schedule','groups','news','profile'].includes(tab))tab='schedule';
+  home.dataset.view=tab;
+  document.querySelectorAll('.quick-nav [data-tab]').forEach(b=>b.classList.toggle('active',b.dataset.tab===tab));
+  $('newsPanel').classList.toggle('hidden',tab!=='news');
+  $('accountPanel').classList.toggle('hidden',tab!=='profile');
+  $('helpPanel').classList.add('hidden');
+  $('emptyScheduleCTA').style.display=tab==='schedule'&&!readFavorite()?'block':'none';
+  if(tab==='news')loadNews();
+  if(tab==='schedule'&&readFavorite()){
+    const f=readFavorite();sourceSelect.value=f.source;openSchedule(f);
+  }else{
+    ++scheduleRequest;scheduleView.classList.add('hidden');home.classList.remove('hidden');
+  }
+  window.scrollTo({top:0,behavior:'smooth'});
+}
 let currentRole=null;
 let chosenRole=null;
 function setRoleSelection(role){
