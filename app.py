@@ -22,6 +22,7 @@ from pydantic import BaseModel, Field
 from features import initialize, save_user, user, news_list, add_news, add_feedback, compare_snapshot, subscribers, admin_authorized
 from fastapi.responses import FileResponse, HTMLResponse
 from aiogram import Bot, Dispatcher
+from aiogram.types import MenuButtonCommands
 from aiogram.filters import CommandStart, Command
 from aiogram.types import (
     Message,
@@ -29,7 +30,6 @@ from aiogram.types import (
     Update,
     ReplyKeyboardMarkup,
     KeyboardButton,
-    WebAppInfo,
     InlineKeyboardMarkup,
     InlineKeyboardButton,
 )
@@ -124,10 +124,7 @@ async def schedule_menu(message: Message):
         text = f"📅 Твоя группа: {current['group_name']}\nОткрой расписание в приложении."
     else:
         text = "📅 Сначала выбери группу в приложении."
-    markup = InlineKeyboardMarkup(inline_keyboard=[[
-        InlineKeyboardButton(text="Открыть расписание", web_app=WebAppInfo(url=WEBAPP_URL))
-    ]]) if WEBAPP_URL.startswith("https://") else None
-    await message.answer(text, reply_markup=markup)
+    await message.answer(text)
 
 
 @dp.message(lambda m: m.text == "👥 Моя группа")
@@ -170,6 +167,7 @@ async def lifespan(app: FastAPI):
     setup_bot_only()
     if bot:
         try:
+            await bot.set_chat_menu_button(menu_button=MenuButtonCommands())
             await bot.set_my_commands([
                 BotCommand(command="start", description="Регистрация и меню"),
                 BotCommand(command="schedule", description="Расписание картинкой"),
