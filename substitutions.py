@@ -151,6 +151,28 @@ def setup_store():
         """)
 
 
+def substitutions_on(day):
+    """All substitutions published for a date, across groups."""
+    from features import db
+    with db() as conn:
+        rows = conn.execute(
+            "SELECT day,group_code AS 'group',lesson,original,replacement,room "
+            "FROM substitution_rows WHERE day=? ORDER BY group_code,lesson", (day,)
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def format_day_changes(rows, day):
+    if not rows:
+        return f"🔄 На {day} опубликованных замен пока нет."
+    parts = [f"🔄 Замены на {day}"]
+    for r in rows:
+        parts.append(f"🎓 {r['group']} · {r['lesson']}-й урок\n"
+                     f"Было: {r['original']}\nСтало: {r['replacement']}"
+                     + (f"\n🏫 {r['room']}" if r["room"] else ""))
+    return "\n\n".join(parts)
+
+
 def substitutions_for(group_name, day):
     from features import db
     key = group_key(group_name)

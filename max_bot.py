@@ -74,7 +74,8 @@ def kb(rows):
 def home_buttons():
     return kb([
         [("📅 Моё расписание", "/today"), ("🔎 Все расписания", "/browse")],
-        [("⭐ Избранное", "/favorites"), ("👤 Профиль", "/profile")],
+        [("🔄 Замены", "/substitutions"), ("⭐ Избранное", "/favorites")],
+        [("👤 Профиль", "/profile")],
         [("📰 Новости", "/news"), ("🏠 Меню", "/start")],
     ])
 
@@ -239,6 +240,49 @@ async def handle(client, uid, text):
             await send(client, uid, "Используй /day 0 (пн) ... /day 5 (сб).")
         else:
             await show_schedule(client, uid, int(parts[1]))
+    elif command == "/substitutions":
+        await send(client, uid, "🔄 Замены — выбери раздел:",
+                   kb([[("👤 Мои замены", "/subsmine")],
+                       [("📆 Замены на день", "/subsdates")],
+                       [("🏠 Меню", "/start")]]))
+    elif command == "/subsmine":
+        from substitutions import substitutions_for, format_group_changes
+        from datetime import datetime, timedelta
+        from zoneinfo import ZoneInfo
+        p = profile(uid)
+        if not p or not p["filename"] or p["source"] != "raspisan":
+            await send(client, uid, "Сначала выбери свою группу.", home_buttons())
+            return
+        today = datetime.now(ZoneInfo(os.getenv("SCHEDULE_TIMEZONE", "Europe/Moscow"))).date()
+        messages = []
+        for delta in range(8):
+            day = (today + timedelta(days=delta)).isoformat()
+            changes = substitutions_for(p["title"], day)
+            if changes:
+                messages.append(format_group_changes(changes, p["title"], day))
+        await send(client, uid, "\n\n".join(messages) if messages else
+                   "Для твоей группы пока нет опубликованных замен на ближайшие дни.",
+                   kb([[("⬅️ Назад", "/substitutions")]]))
+    elif command == "/subsdates":
+        from datetime import datetime, timedelta
+        from zoneinfo import ZoneInfo
+        today = datetime.now(ZoneInfo(os.getenv("SCHEDULE_TIMEZONE", "Europe/Moscow"))).date()
+        rows = [[((today + timedelta(days=i)).strftime("%d.%m"), f"/subsday {i}")]
+                for i in range(8)]
+        rows.append([("⬅️ Назад", "/substitutions")])
+        await send(client, uid, "📆 Выбери день:", kb(rows))
+    elif command == "/subsday":
+        from datetime import datetime, timedelta
+        from zoneinfo import ZoneInfo
+        from substitutions import substitutions_on, format_day_changes
+        parts = text.split()
+        if len(parts) != 2 or not parts[1].isdigit() or int(parts[1]) not in range(8):
+            await send(client, uid, "Выбери дату через «Замены на день».")
+            return
+        day = (datetime.now(ZoneInfo(os.getenv("SCHEDULE_TIMEZONE", "Europe/Moscow"))).date()
+               + timedelta(days=int(parts[1]))).isoformat()
+        await send(client, uid, format_day_changes(substitutions_on(day), day),
+                   kb([[("⬅️ К датам", "/subsdates")]]))
     elif command == "/profile":
         p = profile(uid)
         await send(client, uid, "👤 Профиль\\nРоль: " + ("Преподаватель" if p and p.get("role")=="teacher" else "Студент") + "\\nТвоё расписание: " + (p["title"] if p else "не выбрано"),
