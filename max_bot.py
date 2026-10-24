@@ -33,7 +33,7 @@ def init_max():
     with db() as conn:
         conn.executescript("""
         CREATE TABLE IF NOT EXISTS max_profiles (
-            uid TEXT PRIMARY KEY, source TEXT, filename TEXT, title TEXT
+            uid TEXT PRIMARY KEY, source TEXT, filename TEXT, title TEXT, role TEXT
         );
         CREATE TABLE IF NOT EXISTS max_states (
             uid TEXT PRIMARY KEY, source TEXT, page INTEGER NOT NULL DEFAULT 0
@@ -43,6 +43,9 @@ def init_max():
             title TEXT NOT NULL, PRIMARY KEY(uid, source, filename)
         );
         """)
+        cols = {row["name"] for row in conn.execute("PRAGMA table_info(max_profiles)")}
+        if "role" not in cols:
+            conn.execute("ALTER TABLE max_profiles ADD COLUMN role TEXT")
 
 
 def clean_html(text):
@@ -109,6 +112,11 @@ async def send(client, user_id, text, keyboard=None):
         first = False
 
 
+async def ask_registration(client, uid):
+    await send(client, uid, "👋 Добро пожаловать в РКТМ!\\n\\nКто ты?",
+               kb([[("🎓 Студент", "/reg_student"), ("👨‍🏫 Преподаватель", "/reg_teacher")]]))
+
+
 async def catalog(client, uid, source, page=0):
     html_text = await fetch_html(SCHEDULE_URLS[source])
     parser = GroupParser()
@@ -152,10 +160,10 @@ async def choose(client, uid, number):
     item = parser.groups[idx]
     with db() as conn:
         conn.execute(
-            "INSERT INTO max_profiles(uid,source,filename,title) VALUES(?,?,?,?) "
+            "INSERT INTO max_profiles(uid,source,filename,title,role) VALUES(?,?,?,?,?) "
             "ON CONFLICT(uid) DO UPDATE SET source=excluded.source,"
-            "filename=excluded.filename,title=excluded.title",
-            (uid, source, item["file"], item["name"]),
+            "filename=excluded.filename,title=excluded.title,role=excluded.role",
+            (uid, source, item["file"], item["name"], "teacher" if source=="Praspisan" else "student"),
         )
     await show_schedule(client, uid)
 
@@ -185,9 +193,15 @@ async def show_schedule(client, uid, day=None):
 async def handle(client, uid, text):
     text = (text or "").strip()
     command = text.lower().split()[0] if text else ""
-    if command in ("/start", "/help", "меню"):
+    if command in ("/start", "/help", "меню") and not profile(uid):
+        await ask_registration(client, uid)
+    elif command in ("/reg_student", "/reg_teacher"):
+        await catalog(client, uid, "raspisan" if command=="/reg_student" else "Praspisan")
+    elif command in ("/start", "/help", "меню"):
         await send(client, uid, "📚 РКТМ | Главное меню\n\nВыбери нужный раздел 👇",
                    home_buttons())
+    elif command == "/register":
+        await ask_registration(client, uid)
     elif command == "/browse":
         await send(client, uid, "🔎 Все расписания\\nВыбери категорию:",
                    kb([[("🎓 Группы", "/groups")],
@@ -219,7 +233,9 @@ async def handle(client, uid, text):
             await show_schedule(client, uid, int(parts[1]))
     elif command == "/profile":
         p = profile(uid)
-        await send(client, uid, "👤 Профиль\\nТвоё расписание: " + (p["title"] if p else "не выбрано"), home_buttons())
+        await send(client, uid, "👤 Профиль\\nРоль: " + ("Преподаватель" if p and p.get("role")=="teacher" else "Студент") + "\\nТвоё расписание: " + (p["title"] if p else "не выбрано"),
+                   kb([[("🔄 Изменить группу / преподавателя", "/register")],
+                       [("🏠 Меню", "/start")]]))
     elif command == "/save":
         p = profile(uid)
         if not p:
