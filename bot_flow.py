@@ -39,7 +39,7 @@ def setup():
             filename TEXT NOT NULL, title TEXT NOT NULL,
             UNIQUE(uid,source,filename)
         );
-        CREATE TABLE IF NOT EXISTS bot_pending(
+        CREATE TABLE IF NOT EXISTS bot_catalog_items(\n            id INTEGER PRIMARY KEY AUTOINCREMENT,\n            source TEXT NOT NULL, filename TEXT NOT NULL, title TEXT NOT NULL,\n            UNIQUE(source,filename)\n        );\n        CREATE TABLE IF NOT EXISTS bot_pending(
             uid TEXT PRIMARY KEY, role TEXT NOT NULL,
             display_name TEXT NOT NULL DEFAULT '',
             password_hash TEXT NOT NULL DEFAULT '',
@@ -186,22 +186,17 @@ async def schedule_image(message, source, filename, title):
 
 async def show_item(message, uid, source, filename, title):
     with db() as c:
-        row = c.execute("SELECT id FROM bot_favorites WHERE uid=? AND source=? AND filename=?",
-                        (uid,source,filename)).fetchone()
-        if row:
-            fav_button = ("❌ Убрать из избранного", "unfav:"+str(row["id"]))
-        else:
-            c.execute("INSERT OR IGNORE INTO bot_favorites(uid,source,filename,title) VALUES (?,?,?,?)",
-                      (uid,source,filename,title))
-            row = c.execute("SELECT id FROM bot_favorites WHERE uid=? AND source=? AND filename=?",
-                            (uid,source,filename)).fetchone()
-            # New schedules are NOT added automatically; remove temporary record.
-            c.execute("DELETE FROM bot_favorites WHERE id=?", (row["id"],))
-            fav_button = ("⭐ В избранное", "add:"+source+":"+filename)
-    await message.answer("📖 "+title+"\nВыбери действие:", reply_markup=buttons([
-        [("🖼 Посмотреть расписание", "img:"+source+":"+filename)],
-        [fav_button],
-        [("📌 Сделать моим", "mine:"+source+":"+filename)],
+        c.execute("INSERT INTO bot_catalog_items(source,filename,title) VALUES (?,?,?) ON CONFLICT(source,filename) DO UPDATE SET title=excluded.title",
+                  (source,filename,title))
+        item=c.execute("SELECT id FROM bot_catalog_items WHERE source=? AND filename=?",(source,filename)).fetchone()
+        fav=c.execute("SELECT id FROM bot_favorites WHERE uid=? AND source=? AND filename=?",
+                      (uid,source,filename)).fetchone()
+    item_id=str(item["id"])
+    favorite_button=("❌ Убрать из избранного","unfav:"+str(fav["id"])) if fav else ("⭐ В избранное","addid:"+item_id)
+    await message.answer("📖 "+title+"\\nВыбери действие:", reply_markup=buttons([
+        [("🖼 Посмотреть расписание","imgid:"+item_id)],
+        [favorite_button],
+        [("📌 Сделать моим","mineid:"+item_id)],
     ]))
 
 
@@ -214,7 +209,7 @@ async def show_favorites(message, uid):
     await message.answer("⭐ Избранное", reply_markup=buttons([[(r["title"][:48], "favorite:"+str(r["id"]))] for r in rows]))
 
 
-@router.callback_query(F.data.startswith(("reg:", "cat:", "view:", "browse", "add:", "unfav:", "favorite:", "img:", "mine:")))
+@router.callback_query(F.data.startswith(("reg:", "cat:", "view:", "browse", "addid:", "unfav:", "favorite:", "imgid:", "mineid:")))
 async def callback(call: CallbackQuery):
     await call.answer()
     uid = str(call.from_user.id)
@@ -245,30 +240,26 @@ async def callback(call: CallbackQuery):
                 await show_item(call.message,uid,SOURCES[parts[1]],item["file"],item["name"])
             except (IndexError,KeyError,ValueError):
                 await call.message.answer("Выбор устарел. Открой список заново.")
-    elif data.startswith(("add:", "img:", "mine:")):
-        parts=data.split(":",2)
-        if len(parts)!=3:
+    elif data.startswith(("addid:", "imgid:", "mineid:")):
+        action,_,id_text=data.partition(":")
+        if not id_text.isdigit():
             return
-        action,source,filename=parts
-        if source not in SOURCES.values() or not re.fullmatch(r"[^/\\?#]+\.html?",filename,re.I):
-            return
-        from app import fetch_html, SCHEDULE_URLS, GroupParser
-        parser=GroupParser()
-        parser.feed(await fetch_html(SCHEDULE_URLS[source]))
-        item=next((x for x in parser.groups if x["file"]==filename),None)
+        with db() as c:
+            item=c.execute("SELECT * FROM bot_catalog_items WHERE id=?",(int(id_text),)).fetchone()
         if not item:
-            await call.message.answer("Расписание не найдено в каталоге.")
+            await call.message.answer("Открой расписание в каталоге заново.")
             return
-        if action=="add":
+        source,filename,title=item["source"],item["filename"],item["title"]
+        if action=="addid":
             with db() as c:
                 c.execute("INSERT OR IGNORE INTO bot_favorites(uid,source,filename,title) VALUES (?,?,?,?)",
-                          (uid,source,filename,item["name"]))
-            await call.message.answer("⭐ Добавлено: "+item["name"])
-        elif action=="mine":
-            save_user("telegram",uid,source,filename,item["name"],True)
-            await call.message.answer("📌 Личное расписание: "+item["name"],reply_markup=keyboard(uid))
+                          (uid,source,filename,title))
+            await call.message.answer("⭐ Добавлено: "+title)
+        elif action=="mineid":
+            save_user("telegram",uid,source,filename,title,True)
+            await call.message.answer("📌 Личное расписание: "+title,reply_markup=keyboard(uid))
         else:
-            await schedule_image(call.message,source,filename,item["name"])
+            await schedule_image(call.message,source,filename,title)
     elif data.startswith(("favorite:", "unfav:")):
         command,_,id_text=data.partition(":")
         if not id_text.isdigit():
