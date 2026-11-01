@@ -61,3 +61,8 @@ The main menu shows the saved group/teacher and notification status. Daily sched
 Catalogs, published dates and favorites are paginated. Favorites open in preview mode, with day switching that does not modify the saved profile or notification preference. Menus use plain text and native inline keyboards; no additional permissions, Mini App or database migration is required for this interface update. Existing numeric catalog commands remain supported.
 
 Manual acceptance in MAX: /start, registration as student and teacher, catalog next/back, opening an older catalog button, /today and day buttons, personal substitutions, published dates, favorites with day switching, notification toggle, and return to the main menu. Transport/navigation regressions are covered in tests/test_max_navigation.py; an actual MAX client still needs a visual check after deployment.
+
+
+## Daily schedule photos
+
+Daily schedules now default to shared Pillow PNG cards (schedule_images.py). Install fonts-dejavu-core on Ubuntu. No Chromium process is needed for this path. MAX uses the documented image upload/token workflow and retries attachment.not.ready with bounded backoff. If rendering or photo delivery fails, complete timetable text and day buttons remain available. Test both native clients after deployment; unit transports do not replace a live UI check.

@@ -3,6 +3,7 @@ import asyncio
 import os
 from zoneinfo import ZoneInfo
 import hashlib
+import json
 import io
 import re
 from datetime import datetime
@@ -179,15 +180,22 @@ def teacher_label(text):
     return ", ".join(names) or "не указан в PDF"
 
 
+def display_date(day):
+    try:
+        return datetime.fromisoformat(day).strftime("%d.%m.%Y")
+    except ValueError:
+        return day
+
+
 def format_day_changes(rows, day):
     if not rows:
-        return f"🔄 На {day} опубликованных замен пока нет."
-    parts = [f"🔄 Замены на {day}"]
+        return f"🔄 Замены на {display_date(day)}\n\nОпубликованных изменений пока нет."
+    parts = [f"🔄 Замены на {display_date(day)}"]
     for r in rows:
-        parts.append(f"🎓 {r['group']} · {r['lesson']}-й урок\n"
+        parts.append(f"🎓 {r['group']} · Урок {r['lesson']}\n"
                      f"Было: {r['original']}\nСтало: {r['replacement']}"
                      f"\n👨‍🏫 Преподаватель: {teacher_label(r['replacement'])}"
-                     + (f"\n🏫 Кабинет: {r['room']}" if r["room"] else ""))
+                     + f"\n🏫 Кабинет: {r['room'] or 'не указан в PDF'}")
     return "\n\n".join(parts)
 
 
@@ -313,6 +321,37 @@ def message_parts(message, limit=3500):
         message = message[end:].lstrip("\n")
 
 
+def notification_fingerprint(person, day, rows):
+    title = person["group_name"]
+    identity = teacher_key(title) if person["source"] == "Praspisan" else group_key(title)
+    payload = {"day":day, "source":person["source"], "identity":identity,
+               "rows":sorted([dict(row) for row in rows], key=lambda row: json.dumps(row,sort_keys=True,ensure_ascii=False))}
+    return digest(json.dumps(payload, sort_keys=True, ensure_ascii=False).encode())
+
+
+def legacy_notification(rows, day):
+    """Recognize successful deliveries from versions before semantic fingerprints."""
+    if not rows:
+        return f"🔄 Замены на {day}: ранее опубликованные замены для тебя отменены."
+    parts = [f"🔄 Замены на {day}"]
+    for row in rows:
+        parts.append(f"🎓 {row['group']} · {row['lesson']}-й урок\nБыло: {row['original']}\n"
+            f"Стало: {row['replacement']}\n👨‍🏫 Преподаватель: {teacher_label(row['replacement'])}"
+            + (f"\n🏫 Кабинет: {row['room']}" if row['room'] else ""))
+    return "\n\n".join(parts)
+
+
+def legacy_notification_hashes(person, rows, day):
+    hashes = {digest(legacy_notification(rows, day).encode())}
+    if rows and person["source"] == "raspisan":
+        parts = [f"🔔 Замены на {day}\n🎓 {person['group_name']}"]
+        for row in sorted(rows, key=lambda row: row["lesson"]):
+            parts.append(f"🔄 {row['lesson']}-й урок\nБыло: {row['original']}\nСтало: {row['replacement']}"
+                + (f"\n🏫 {row['room']}" if row['room'] else ""))
+        hashes.add(digest("\n\n".join(parts).encode()))
+    return hashes
+
+
 async def notify_changed(days, telegram_bot=None):
     """Retry undelivered current versions each cycle; mark only successful sends."""
     from features import db
@@ -337,15 +376,21 @@ async def notify_changed(days, telegram_bot=None):
                 if not old:
                     continue
                 message = f"🔄 Замены на {day}: ранее опубликованные замены для тебя отменены."
-            checksum = digest(message.encode())
-            if old and old["content_hash"] == checksum:
+            rows = personal_rows(person, day)
+            checksum = notification_fingerprint(person, day, rows)
+            part_hash = digest(message.encode())
+            if old and old["content_hash"] in ({checksum} | legacy_notification_hashes(person,rows,day)):
+                if old["content_hash"] != checksum:
+                    with db() as conn:
+                        conn.execute("UPDATE substitution_deliveries SET content_hash=? WHERE platform=? AND uid=? AND day=?",
+                                     (checksum,person["platform"],str(person["user_id"]),day))
                 continue
             try:
                 for index, part in enumerate(message_parts(message)):
                     with db() as conn:
                         sent = conn.execute("SELECT 1 FROM substitution_parts WHERE platform=? AND uid=? "
                             "AND day=? AND content_hash=? AND part=?",
-                            (person["platform"], str(person["user_id"]), day, checksum, index)).fetchone()
+                            (person["platform"], str(person["user_id"]), day, part_hash, index)).fetchone()
                     if sent:
                         continue
                     if person["platform"] == "telegram" and telegram_bot:
@@ -362,7 +407,7 @@ async def notify_changed(days, telegram_bot=None):
                         break
                     with db() as conn:
                         conn.execute("INSERT OR IGNORE INTO substitution_parts VALUES(?,?,?,?,?)",
-                            (person["platform"], str(person["user_id"]), day, checksum, index))
+                            (person["platform"], str(person["user_id"]), day, part_hash, index))
                     await asyncio.sleep(0.05)
                 else:
                     with db() as conn:

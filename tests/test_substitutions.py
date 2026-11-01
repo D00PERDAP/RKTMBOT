@@ -78,20 +78,39 @@ class StoreTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(bot.send_message.call_count, 2)
     async def test_partial_delivery_resume_and_content_reversion(self):
         features.save_user('telegram',1,'raspisan','1.html','АТ-15',True)
+        with features.db() as c:
+            c.execute('INSERT INTO substitution_rows_v2 VALUES(?,?,?,?,?,?,?)', ('u',self.day,'АТ-15',1,'a'*2000,'b'*2000,'25'))
         bot=AsyncMock()
-        message='a' * 3500 + 'b' * 100
         bot.send_message.side_effect=[None,RuntimeError('second part failed')]
-        with patch.object(s,'personal_message',return_value=message):
-            await s.notify_changed([self.day],bot)
-            bot.send_message.reset_mock(); bot.send_message.side_effect=None
-            await s.notify_changed([self.day],bot)
-            self.assertEqual(bot.send_message.call_count,1)
-            self.assertEqual(bot.send_message.call_args.args[1], 'b' * 100)
-        with patch.object(s,'personal_message',return_value='changed'):
-            await s.notify_changed([self.day],bot)
-        with patch.object(s,'personal_message',return_value=message):
-            await s.notify_changed([self.day],bot)
+        await s.notify_changed([self.day],bot)
+        self.assertEqual(bot.send_message.call_count,2)
+        failed_part=bot.send_message.call_args.args[1]
+        bot.send_message.reset_mock();bot.send_message.side_effect=None
+        await s.notify_changed([self.day],bot)
+        self.assertEqual(bot.send_message.call_count,1)
+        self.assertEqual(bot.send_message.call_args.args[1],failed_part)
+        with features.db() as c:
+            c.execute("UPDATE substitution_rows_v2 SET replacement='changed'")
+        await s.notify_changed([self.day],bot)
+        with features.db() as c:
+            c.execute('UPDATE substitution_rows_v2 SET replacement=?',('b'*2000,))
+        await s.notify_changed([self.day],bot)
         self.assertEqual(bot.send_message.call_count,4)
+
+    async def test_style_change_and_legacy_receipt_do_not_resend_unchanged_rows(self):
+        await self.refresh()
+        group=s.substitutions_on(self.day)[0]['group']
+        features.save_user('telegram',1,'raspisan','1.html',group,True)
+        rows=s.personal_rows(features.user('telegram',1),self.day)
+        old=s.digest(s.legacy_notification(rows,self.day).encode())
+        with features.db() as c:
+            c.execute('INSERT INTO substitution_deliveries VALUES(?,?,?,?)',('telegram','1',self.day,old))
+        bot=AsyncMock()
+        await s.notify_changed([self.day],bot)
+        bot.send_message.assert_not_awaited()
+        with patch.object(s,'format_day_changes',return_value='Другое оформление того же содержания'):
+            await s.notify_changed([self.day],bot)
+        bot.send_message.assert_not_awaited()
 
     async def test_corrected_url_and_reversion(self):
         await self.refresh()
@@ -128,12 +147,13 @@ class StoreTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(p['notifications'],0)
     async def test_telegram_toggle(self):
         from bot_flow import notification_setting
-        features.save_user('telegram', 1, 'raspisan','1.html','АТ-15',False)
+        features.save_user('telegram',1,'raspisan','1.html','АТ-15',False)
         msg=AsyncMock(); msg.from_user.id=1; msg.text='/notify'
-        await notification_setting(msg)
-        self.assertEqual(features.user('telegram',1)['notifications'],1)
-        msg.text='/mute'; await notification_setting(msg)
-        self.assertEqual(features.user('telegram',1)['notifications'],0)
+        with patch('bot_flow.show_settings', AsyncMock()):
+            await notification_setting(msg)
+            self.assertEqual(features.user('telegram',1)['notifications'],1)
+            msg.text='/mute'; await notification_setting(msg)
+            self.assertEqual(features.user('telegram',1)['notifications'],0)
     async def test_max_delivery_api_failure_and_success(self):
         await self.refresh()
         group=s.substitutions_on(self.day)[0]['group']

@@ -4,6 +4,9 @@ Production deployments should switch to MAX webhooks per official guidance.
 """
 import asyncio
 from datetime import datetime, timedelta
+from collections import OrderedDict
+import hashlib
+from html import escape
 from zoneinfo import ZoneInfo
 from contextvars import ContextVar
 import logging
@@ -92,7 +95,7 @@ def back_home():
 
 def profile_label(p):
     kind = "Преподаватель" if p["source"] == "Praspisan" else "Группа"
-    return f"{kind}: {p['title']}"
+    return f"{kind}: {p['title'].rstrip(' ,')}"
 
 
 def notification_enabled(uid):
@@ -154,6 +157,72 @@ async def send(client, user_id, text, keyboard=None):
         if response.json().get("success") is False:
             raise ValueError("MAX rejected message")
         first = False
+
+
+_IMAGE_TOKENS = OrderedDict()
+
+
+async def upload_image(client, image):
+    key = hashlib.sha256(image).hexdigest()
+    if key in _IMAGE_TOKENS:
+        _IMAGE_TOKENS.move_to_end(key)
+        return _IMAGE_TOKENS[key]
+    response = await client.post("/uploads", params={"type":"image"})
+    response.raise_for_status()
+    upload_url = response.json()["url"]
+    if not upload_url.startswith("https://"):
+        raise ValueError("MAX returned an invalid upload URL")
+    # The signed upload URL supplies its own credentials; do not forward the bot token.
+    request = client.build_request("POST", upload_url,
+        files={"data":("schedule.png", image, "image/png")}, timeout=45)
+    request.headers.pop("Authorization", None)
+    uploaded = await client.send(request)
+    uploaded.raise_for_status()
+    data = uploaded.json()
+    token = data.get("token")
+    if not token:
+        token = next((photo.get("token") for photo in data.get("photos", {}).values()
+                      if isinstance(photo,dict) and photo.get("token")), None)
+    if not token:
+        raise ValueError("MAX did not return an image token")
+    _IMAGE_TOKENS[key] = token
+    while len(_IMAGE_TOKENS) > 32:
+        _IMAGE_TOKENS.popitem(last=False)
+    return token
+
+
+async def image_request(client, method, params, payload):
+    for attempt in range(4):
+        response = await client.request(method, "/messages", params=params, json=payload, timeout=25)
+        data = response.json()
+        if data.get("code") == "attachment.not.ready" and attempt < 3:
+            await asyncio.sleep(0.5 * 2**attempt)
+            continue
+        if response.is_error:
+            _IMAGE_TOKENS.clear()
+        response.raise_for_status()
+        if data.get("success") is False or data.get("code") == "attachment.not.ready":
+            _IMAGE_TOKENS.clear()
+            raise ValueError("MAX could not send the image")
+        return
+
+
+async def send_photo_pages(client, uid, pages, keyboard, title):
+    # Prepare every upload before editing the screen. Failed uploads fall back to text.
+    tokens = [await upload_image(client, page) for page in pages]
+    for index, token in enumerate(tokens):
+        attachments = [{"type":"image", "payload":{"token":token}}]
+        if index == len(tokens)-1:
+            attachments.append(keyboard)
+        payload = {"text":f"📅 {title} · {index+1}/{len(tokens)}"[:900], "attachments":attachments}
+        target = EDIT_TARGET.get() if index == 0 else None
+        if target:
+            try:
+                await image_request(client, "PUT", {"message_id":target}, {**payload,"notify":False})
+                continue
+            except (httpx.HTTPStatusError, ValueError):
+                log.info("Cannot replace MAX photo screen; sending new photo")
+        await image_request(client, "POST", {"user_id":int(uid)}, payload)
 
 
 async def ask_registration(client, uid):
@@ -243,13 +312,15 @@ async def show_schedule(client, uid, day=None, selected=None):
     if day is None:
         day = today_schedule_day()
     if day == 6:
-        text = f"{p['title']} — воскресенье\nСегодня выходной, уроков нет."
+        parts = [f"📅 {escape(p['title'])} · Воскресенье\nСегодня выходной, уроков нет."]
+        text = "\n\n".join(clean_html(part) for part in parts)
     else:
         if day not in range(6):
             await send(client, uid, "День недели: от 0 (пн) до 5 (сб).")
             return
         schedule = await fetch_html(urljoin(SCHEDULE_BASE, p["filename"]))
-        text = "\n\n".join(clean_html(part) for part in schedule_text_parts(p["title"], schedule, day))
+        parts = schedule_text_parts(p["title"], schedule, day)
+        text = "\n\n".join(clean_html(part) for part in parts)
     from substitutions import personal_message
     local_today = datetime.now(ZoneInfo(os.getenv("SCHEDULE_TIMEZONE", "Europe/Moscow"))).date()
     target_date = (local_today + timedelta(days=(day - local_today.weekday()) % 7)).isoformat()
@@ -267,7 +338,13 @@ async def show_schedule(client, uid, day=None, selected=None):
                  [("🔄 Мои замены", "/subsmine"), ("🏠 Главное меню", "/start")]]
     if selected:
         text = "⭐ Избранное · Просмотр\n\n" + text
-    await send(client, uid, text + "\n\nДругой день — кнопками ниже.", kb(rows))
+    try:
+        from schedule_images import daily_images
+        pages = await daily_images(p["title"], parts, changes)
+        await send_photo_pages(client, uid, pages, kb(rows), p["title"])
+    except Exception:
+        log.exception("MAX schedule image unavailable; using text")
+        await send(client, uid, "📋 Текстовая версия расписания\n\n" + text + "\n\nДругой день — кнопками ниже.", kb(rows))
 
 
 async def handle(client, uid, text):
