@@ -19,7 +19,7 @@ from dotenv import load_dotenv
 load_dotenv(Path(__file__).resolve().parent / ".env")
 from app import GroupParser, SCHEDULE_BASE, SCHEDULE_URLS, fetch_html
 from bot_flow import schedule_text_parts, today_schedule_day
-from features import db, initialize, news_list
+from features import db, initialize, news_list, save_user, user
 
 API = "https://platform-api2.max.ru"
 TOKEN = os.getenv("MAX_BOT_TOKEN", "").strip()
@@ -46,6 +46,12 @@ def init_max():
         cols = {row["name"] for row in conn.execute("PRAGMA table_info(max_profiles)")}
         if "role" not in cols:
             conn.execute("ALTER TABLE max_profiles ADD COLUMN role TEXT")
+        # Preserve existing explicit subscriptions, including muted profiles.
+        conn.execute("INSERT OR IGNORE INTO users(platform,user_id,source,filename,group_name,notifications) "
+                     "SELECT 'max',uid,source,filename,title,1 FROM max_profiles WHERE filename IS NOT NULL")
+    from substitutions import setup_store
+    setup_store()
+
 
 
 def clean_html(text):
@@ -76,6 +82,7 @@ def home_buttons():
         [("📅 Моё расписание", "/today"), ("🔎 Все расписания", "/browse")],
         [("🔄 Замены", "/substitutions"), ("⭐ Избранное", "/favorites")],
         [("👤 Профиль", "/profile")],
+        [("🔔 Включить", "/notify"), ("🔕 Выключить", "/mute")],
         [("📰 Новости", "/news"), ("🏠 Меню", "/start")],
     ])
 
@@ -87,9 +94,9 @@ async def send(client, user_id, text, keyboard=None):
     first = True
     while remaining:
         chunk = remaining[:3500]
-        if len(remaining) > 3500 and "\\n" in chunk:
-            chunk = chunk[:chunk.rfind("\\n")] or chunk
-        remaining = remaining[len(chunk):].lstrip("\\n")
+        if len(remaining) > 3500 and "\n" in chunk:
+            chunk = chunk[:chunk.rfind("\n")] or chunk
+        remaining = remaining[len(chunk):].lstrip("\n")
         payload = {"text": chunk, "attachments": [keyboard] if keyboard and not remaining else []}
         if target and first:
             try:
@@ -114,7 +121,7 @@ async def send(client, user_id, text, keyboard=None):
 
 
 async def ask_registration(client, uid):
-    await send(client, uid, "👋 Добро пожаловать в РКТМ!\\n\\nКто ты?",
+    await send(client, uid, "👋 Добро пожаловать в РКТМ!\n\nКто ты?",
                kb([[("🎓 Студент", "/reg_student"), ("👨‍🏫 Преподаватель", "/reg_teacher")]]))
 
 
@@ -166,6 +173,8 @@ async def choose(client, uid, number):
             "filename=excluded.filename,title=excluded.title,role=excluded.role",
             (uid, source, item["file"], item["name"], "teacher" if source=="Praspisan" else "student"),
         )
+    previous = user("max", uid)
+    save_user("max", uid, source, item["file"], item["name"], previous["notifications"] if previous else True)
     await show_schedule(client, uid)
 
 
@@ -212,7 +221,7 @@ async def handle(client, uid, text):
     elif command == "/register":
         await ask_registration(client, uid)
     elif command == "/browse":
-        await send(client, uid, "🔎 Все расписания\\nВыбери категорию:",
+        await send(client, uid, "🔎 Все расписания\nВыбери категорию:",
                    kb([[("🎓 Группы", "/groups")],
                        [("👨‍🏫 Преподаватели", "/teachers")],
                        [("🏠 Меню", "/start")]]))
@@ -246,46 +255,31 @@ async def handle(client, uid, text):
                        [("📆 Замены на день", "/subsdates")],
                        [("🏠 Меню", "/start")]]))
     elif command == "/subsmine":
-        from substitutions import substitutions_for, format_group_changes
-        from datetime import datetime, timedelta
-        from zoneinfo import ZoneInfo
+        from substitutions import personal_overview
         p = profile(uid)
-        if not p or not p["filename"] or p["source"] != "raspisan":
-            await send(client, uid, "Сначала выбери свою группу.", home_buttons())
-            return
-        today = datetime.now(ZoneInfo(os.getenv("SCHEDULE_TIMEZONE", "Europe/Moscow"))).date()
-        messages = []
-        for delta in range(8):
-            day = (today + timedelta(days=delta)).isoformat()
-            changes = substitutions_for(p["title"], day)
-            if changes:
-                messages.append(format_group_changes(changes, p["title"], day))
-        await send(client, uid, "\n\n".join(messages) if messages else
-                   "Для твоей группы пока нет опубликованных замен на ближайшие дни.",
+        await send(client, uid, personal_overview(p) if p else "Сначала выбери группу или преподавателя.",
                    kb([[("⬅️ Назад", "/substitutions")]]))
     elif command == "/subsdates":
-        from datetime import datetime, timedelta
-        from zoneinfo import ZoneInfo
-        today = datetime.now(ZoneInfo(os.getenv("SCHEDULE_TIMEZONE", "Europe/Moscow"))).date()
-        rows = [[((today + timedelta(days=i)).strftime("%d.%m"), f"/subsday {i}")]
-                for i in range(8)]
+        from substitutions import published_dates
+        rows = [[(day, f"/subsday {day}")] for day in published_dates()]
         rows.append([("⬅️ Назад", "/substitutions")])
-        await send(client, uid, "📆 Выбери день:", kb(rows))
+        await send(client, uid, "📆 Опубликованные даты:", kb(rows))
     elif command == "/subsday":
-        from datetime import datetime, timedelta
-        from zoneinfo import ZoneInfo
-        from substitutions import substitutions_on, format_day_changes
+        from substitutions import published_dates, substitutions_on, format_day_changes
         parts = text.split()
-        if len(parts) != 2 or not parts[1].isdigit() or int(parts[1]) not in range(8):
+        if len(parts) != 2 or parts[1] not in published_dates():
             await send(client, uid, "Выбери дату через «Замены на день».")
             return
-        day = (datetime.now(ZoneInfo(os.getenv("SCHEDULE_TIMEZONE", "Europe/Moscow"))).date()
-               + timedelta(days=int(parts[1]))).isoformat()
-        await send(client, uid, format_day_changes(substitutions_on(day), day),
+        await send(client, uid, format_day_changes(substitutions_on(parts[1]), parts[1]),
                    kb([[("⬅️ К датам", "/subsdates")]]))
+    elif command in ("/notify", "/mute"):
+        with db() as conn:
+            conn.execute("UPDATE users SET notifications=? WHERE platform='max' AND user_id=?",
+                         (int(command == "/notify"), str(uid)))
+        await send(client, uid, "🔔 Уведомления включены" if command == "/notify" else "🔕 Уведомления выключены")
     elif command == "/profile":
         p = profile(uid)
-        await send(client, uid, "👤 Профиль\\nРоль: " + ("Преподаватель" if p and p.get("role")=="teacher" else "Студент") + "\\nТвоё расписание: " + (p["title"] if p else "не выбрано"),
+        await send(client, uid, "👤 Профиль\nРоль: " + ("Преподаватель" if p and p.get("role")=="teacher" else "Студент") + "\nТвоё расписание: " + (p["title"] if p else "не выбрано"),
                    kb([[("🔄 Изменить группу / преподавателя", "/register")],
                        [("🏠 Меню", "/start")]]))
     elif command == "/save":
@@ -310,7 +304,7 @@ async def handle(client, uid, text):
         await send(client, uid, "Неизвестная команда. Отправь /help.")
 
 
-async def run():
+async def poll():
     if not TOKEN:
         raise RuntimeError("MAX_BOT_TOKEN не задан в .env")
     init_max()
@@ -360,6 +354,22 @@ async def run():
             except (httpx.HTTPError, ValueError):
                 log.exception("MAX polling error, retrying")
                 await asyncio.sleep(5)
+
+
+async def run():
+    from substitutions import monitor
+    init_max()
+    # When Telegram is configured the web service owns both platforms' notifications.
+    task = asyncio.create_task(monitor()) if not os.getenv("BOT_TOKEN", "").strip() else None
+    try:
+        await poll()
+    finally:
+        if task:
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
 
 
 if __name__ == "__main__":

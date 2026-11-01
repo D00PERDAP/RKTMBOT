@@ -203,7 +203,7 @@ async def onboarding(call: CallbackQuery):
                 digest, salt = hash_password(secrets.token_urlsafe(32))
                 c.execute("INSERT INTO bot_accounts(uid,display_name,password_hash,password_salt) VALUES(?,?,?,?)",
                           (uid, item["name"], digest, salt))
-        save_user("telegram", uid, SOURCES[role], item["file"], item["name"], True)
+        save_user("telegram", uid, SOURCES[role], item["file"], item["name"], (user("telegram", uid) or {}).get("notifications", True))
         set_state(uid, None)
         await schedule_image(call.message, SOURCES[role], item["file"], item["name"], edit=True)
         await call.message.answer("✅ Регистрация завершена! Кнопки главного меню находятся снизу 👇", reply_markup=keyboard(uid))
@@ -575,10 +575,8 @@ def substitution_menu():
 
 
 def substitution_dates():
-    from datetime import timedelta
-    today = datetime.now(ZoneInfo(SCHEDULE_TIMEZONE)).date()
-    rows = [[((today + timedelta(days=i)).strftime("%d.%m (%a)"), f"subs:day:{i}")]
-            for i in range(8)]
+    from substitutions import published_dates
+    rows = [[(day, f"subs:day:{day}")] for day in published_dates()]
     rows.append([("⬅️ Назад", "subs:menu")])
     return buttons(rows)
 
@@ -599,25 +597,22 @@ async def substitution_callback(call: CallbackQuery):
         await show_screen(call.message, "📆 Выбери день:", edit=True, reply_markup=substitution_dates())
     elif action == "subs:mine":
         p = user("telegram", uid)
-        if not p or not p["filename"] or p["source"] != "raspisan":
-            content = "Сначала выбери свою группу через /start."
-        else:
-            today = datetime.now(ZoneInfo(SCHEDULE_TIMEZONE)).date()
-            messages = []
-            for delta in range(8):
-                date = (today + timedelta(days=delta)).isoformat()
-                changes = substitutions_for(p["group_name"], date)
-                if changes:
-                    messages.append(format_group_changes(changes, p["group_name"], date))
-            content = "\n\n".join(messages) if messages else "Для твоей группы пока нет опубликованных замен на ближайшие дни."
-        await show_screen(call.message, content[:3900], edit=True, reply_markup=substitution_menu())
+        from substitutions import personal_overview, published_dates, message_parts
+        content = personal_overview(p) if p and p["filename"] else "Сначала выбери группу или преподавателя через /start."
+        parts = list(message_parts(content))
+        await show_screen(call.message, parts[0], edit=True, reply_markup=substitution_menu())
+        for part in parts[1:]:
+            await call.message.answer(part)
     elif action.startswith("subs:day:"):
-        offset = int(action.rsplit(":", 1)[1])
-        if offset not in range(8):
+        from substitutions import published_dates, message_parts
+        day = action.removeprefix("subs:day:")
+        if day not in published_dates():
             return
-        day = (datetime.now(ZoneInfo(SCHEDULE_TIMEZONE)).date() + timedelta(days=offset)).isoformat()
-        content = format_day_changes(substitutions_on(day), day)
-        await show_screen(call.message, content[:3900], edit=True, reply_markup=substitution_dates())
+        parts = list(message_parts(format_day_changes(substitutions_on(day), day)))
+        await show_screen(call.message, parts[0], edit=True, reply_markup=substitution_dates())
+        for part in parts[1:]:
+            await call.message.answer(part)
+
 
 
 @router.message(Command("substitutions"))
@@ -659,6 +654,20 @@ async def admin_teachers(message: Message):
         else:
             c.execute("DELETE FROM approved_teachers WHERE uid=?",(target,))
     await message.answer("Готово.")
+
+
+@router.message(Command("notify", "mute"))
+async def notification_setting(message: Message):
+    uid = str(message.from_user.id)
+    p = user("telegram", uid)
+    if not p:
+        await message.answer("Сначала зарегистрируйся через /start.")
+        return
+    enabled = message.text.split()[0].split("@")[0] == "/notify"
+    with db() as conn:
+        conn.execute("UPDATE users SET notifications=? WHERE platform='telegram' AND user_id=?",
+                     (int(enabled), uid))
+    await message.answer("🔔 Уведомления включены." if enabled else "🔕 Уведомления выключены.")
 
 
 @router.message(F.text)

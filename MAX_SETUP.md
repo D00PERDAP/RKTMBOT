@@ -51,4 +51,4 @@ Use a dedicated unprivileged service account when available. Do not commit `.env
 
 `/start`, `/help`, `/groups`, `/teachers`, `/next`, `/prev`, `/today`, `/day 0` through `/day 5`, `/profile`, `/save`, `/favorites`, `/news`.
 
-This first version is text-based. Favorite switching, inline buttons, notifications, and MAX admin functions are not implemented yet.
+The adapter supports inline menus, personal substitutions for students and teachers, published substitution dates, /notify and /mute. See SERVER_UPDATE.md for shared DATABASE_PATH, migration and monitor ownership. MAX admin functions are not implemented.

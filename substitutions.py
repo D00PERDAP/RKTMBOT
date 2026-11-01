@@ -1,4 +1,7 @@
 """Automatic college PDF substitution discovery and safe per-group extraction."""
+import asyncio
+import os
+from zoneinfo import ZoneInfo
 import hashlib
 import io
 import re
@@ -19,13 +22,13 @@ MONTHS = {"января": 1, "февраля": 2, "марта": 3, "апреля
 
 def group_key(name):
     """Match official short group codes against full catalog labels."""
-    value = re.sub(r"\s+", "", name or "").upper().replace("Ё", "Е")
+    value = re.sub(r"\s+", "", name or "").upper().replace("Ё", "Е").replace("–", "-").replace("—", "-")
     match = GROUP_RE.search(value)
     if not match:
         return None
     # Catalog names include training year: АТ09.29-15 -> АТ-15.
-    suffix = re.search(r"[-–](\d{2})$", value)
-    return (match.group(1).replace("Ё", "Е"), suffix.group(1) if suffix else match.group(2))
+    suffix = re.search(r"[-–](\d{2})К?$", value)
+    return (match.group(1).replace("Ё", "Е"), suffix.group(1) if suffix else match.group(2), "к" if value.endswith("К") else "")
 
 
 def document_date(value):
@@ -91,7 +94,7 @@ def parse_pdf(data, date):
                     result.append({"date": date, "group": group, "lesson": current_lesson,
                                    "original": original, "replacement": replacement, "room": room})
     # The same row can be extracted twice on documents with overlapping borders.
-    return list({(r["date"], r["group"], r["lesson"]): r for r in result}.values())
+    return list({tuple(r.values()): r for r in result}.values())
 
 
 async def fetch_documents():
@@ -123,32 +126,41 @@ def format_group_changes(rows, group_name, date):
                       key=lambda r: r["lesson"]) if key else []
     if not matching:
         return ""
-    parts = [f"🔔 Замены на {date}\n🎓 {group_name}"]
-    for r in matching:
-        parts.append(f"🔄 {r['lesson']}-й урок\nБыло: {r['original']}\n"
-                     f"Стало: {r['replacement']}" + (f"\n🏫 {r['room']}" if r["room"] else ""))
-    return "\n\n".join(parts)
+    return format_day_changes(matching, date)
 
 
 def setup_store():
     from features import db
     with db() as conn:
         conn.executescript("""
+        CREATE TABLE IF NOT EXISTS substitution_parts (
+            platform TEXT NOT NULL, uid TEXT NOT NULL, day TEXT NOT NULL,
+            content_hash TEXT NOT NULL, part INTEGER NOT NULL,
+            PRIMARY KEY(platform,uid,day,content_hash,part)
+        );
         CREATE TABLE IF NOT EXISTS substitution_documents (
             url TEXT PRIMARY KEY, day TEXT NOT NULL, digest TEXT NOT NULL
         );
-        CREATE TABLE IF NOT EXISTS substitution_rows (
+        CREATE TABLE IF NOT EXISTS substitution_rows_v2 (
             url TEXT NOT NULL, day TEXT NOT NULL, group_code TEXT NOT NULL,
             lesson INTEGER NOT NULL, original TEXT NOT NULL,
             replacement TEXT NOT NULL, room TEXT NOT NULL,
-            PRIMARY KEY(url,group_code,lesson)
+            PRIMARY KEY(url,group_code,lesson,original,replacement,room)
         );
+        CREATE TABLE IF NOT EXISTS substitution_migrations (name TEXT PRIMARY KEY);
+
         CREATE TABLE IF NOT EXISTS substitution_deliveries (
             platform TEXT NOT NULL, uid TEXT NOT NULL, day TEXT NOT NULL,
             content_hash TEXT NOT NULL,
             PRIMARY KEY(platform,uid,day)
         );
         """)
+        # Additive migration preserves the legacy table for rollback. Copy once only.
+        if not conn.execute("SELECT 1 FROM substitution_migrations WHERE name='rows_v2'").fetchone():
+            legacy = conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='substitution_rows'").fetchone()
+            if legacy:
+                conn.execute("INSERT OR IGNORE INTO substitution_rows_v2 SELECT * FROM substitution_rows")
+            conn.execute("INSERT INTO substitution_migrations VALUES('rows_v2')")
 
 
 def substitutions_on(day):
@@ -156,10 +168,15 @@ def substitutions_on(day):
     from features import db
     with db() as conn:
         rows = conn.execute(
-            "SELECT day,group_code AS 'group',lesson,original,replacement,room "
-            "FROM substitution_rows WHERE day=? ORDER BY group_code,lesson", (day,)
+            "SELECT DISTINCT day,group_code AS 'group',lesson,original,replacement,room "
+            "FROM substitution_rows_v2 WHERE day=? ORDER BY group_code,lesson,original,replacement,room", (day,)
         ).fetchall()
     return [dict(r) for r in rows]
+
+
+def teacher_label(text):
+    names = re.findall(r"[А-ЯЁ][а-яё]+(?:-[А-ЯЁ][а-яё]+)?\s+[А-ЯЁ]\.\s*[А-ЯЁ]\.", text)
+    return ", ".join(names) or "не указан в PDF"
 
 
 def format_day_changes(rows, day):
@@ -169,7 +186,8 @@ def format_day_changes(rows, day):
     for r in rows:
         parts.append(f"🎓 {r['group']} · {r['lesson']}-й урок\n"
                      f"Было: {r['original']}\nСтало: {r['replacement']}"
-                     + (f"\n🏫 {r['room']}" if r["room"] else ""))
+                     f"\n👨‍🏫 Преподаватель: {teacher_label(r['replacement'])}"
+                     + (f"\n🏫 Кабинет: {r['room']}" if r["room"] else ""))
     return "\n\n".join(parts)
 
 
@@ -180,10 +198,19 @@ def substitutions_for(group_name, day):
         return []
     with db() as conn:
         rows = conn.execute(
-            "SELECT day,group_code AS 'group',lesson,original,replacement,room "
-            "FROM substitution_rows WHERE day=? ORDER BY lesson", (day,)
+            "SELECT DISTINCT day,group_code AS 'group',lesson,original,replacement,room "
+            "FROM substitution_rows_v2 WHERE day=? ORDER BY lesson,original,replacement,room", (day,)
         ).fetchall()
     return [dict(r) for r in rows if group_key(r["group"]) == key]
+
+
+def retire_superseded(day, documents):
+    from features import db
+    active = {d["url"] for d in documents if d["date"] == day}
+    with db() as conn:
+        for previous in conn.execute("SELECT url FROM substitution_documents WHERE day=?", (day,)).fetchall():
+            if previous["url"] not in active:
+                conn.execute("DELETE FROM substitution_rows_v2 WHERE url=?", (previous["url"],))
 
 
 async def refresh():
@@ -191,22 +218,25 @@ async def refresh():
     from features import db
     setup_store()
     changed = set()
-    for doc in await fetch_documents():
+    documents = await fetch_documents()
+    for doc in documents:
         try:
             data = await download_pdf(doc["url"])
             checksum = digest(data)
             with db() as conn:
-                old = conn.execute("SELECT digest FROM substitution_documents WHERE url=?",
+                old = conn.execute("SELECT digest,day FROM substitution_documents WHERE url=?",
                                    (doc["url"],)).fetchone()
-            if old and old["digest"] == checksum:
+                has_rows = conn.execute("SELECT 1 FROM substitution_rows_v2 WHERE url=? LIMIT 1", (doc["url"],)).fetchone()
+            if old and has_rows and old["digest"] == checksum and old["day"] == doc["date"]:
+                retire_superseded(doc["date"], documents)
                 continue
-            rows = parse_pdf(data, doc["date"])
+            rows = await asyncio.to_thread(parse_pdf, data, doc["date"])
             if not rows:
                 continue  # Never erase known data on an unrecognized PDF.
             with db() as conn:
-                conn.execute("DELETE FROM substitution_rows WHERE url=?", (doc["url"],))
+                conn.execute("DELETE FROM substitution_rows_v2 WHERE url=?", (doc["url"],))
                 conn.executemany(
-                    "INSERT INTO substitution_rows VALUES(?,?,?,?,?,?,?)",
+                    "INSERT INTO substitution_rows_v2 VALUES(?,?,?,?,?,?,?)",
                     [(doc["url"], r["date"], r["group"], r["lesson"],
                       r["original"], r["replacement"], r["room"]) for r in rows]
                 )
@@ -214,6 +244,7 @@ async def refresh():
                     "INSERT INTO substitution_documents VALUES(?,?,?) "
                     "ON CONFLICT(url) DO UPDATE SET day=excluded.day,digest=excluded.digest",
                     (doc["url"], doc["date"], checksum))
+            retire_superseded(doc["date"], documents)
             changed.add(doc["date"])
         except Exception:
             import logging
@@ -221,53 +252,161 @@ async def refresh():
     return changed
 
 
-async def notify_changed(days, telegram_bot=None):
-    """Send a changed group-specific digest once per version per platform."""
-    import os
+def published_dates():
     from features import db
-    from html import escape
+    setup_store()
+    with db() as conn:
+        return [r[0] for r in conn.execute(
+            "SELECT DISTINCT day FROM substitution_documents ORDER BY day DESC")]
+
+
+def teacher_key(value):
+    return re.sub(r"[^а-яa-z]", "", (value or "").lower().replace("ё", "е"))
+
+
+def teacher_matches(name, text):
+    # Catalog uses surname + initials; require a complete surname, not a substring.
+    name = (name or "").replace("ё", "е").replace("Ё", "Е")
+    text = text.replace("ё", "е").replace("Ё", "Е")
+    tokens = re.findall(r"[А-ЯЁа-яё]+", name)
+    if not tokens:
+        return False
+    surname = tokens[0]
+    for match in re.finditer(r"(?<![А-ЯЁа-яё])" + re.escape(surname) +
+                             r"(?![А-ЯЁа-яё])(?:\s+([А-ЯЁ])\.?\s*([А-ЯЁ])\.?)?",
+                             text, re.I):
+        initials = "".join(t[0] for t in tokens[1:3])
+        found = "".join(x or "" for x in match.groups())
+        if not initials or not found or teacher_key(initials) == teacher_key(found):
+            return True
+    return False
+
+
+def personal_rows(person, day):
+    title = person.get("group_name", person.get("title", ""))
+    if person["source"] == "Praspisan":
+        return [r for r in substitutions_on(day)
+                if teacher_matches(title, r["original"]) or teacher_matches(title, r["replacement"])]
+    if person["source"] == "raspisan":
+        return substitutions_for(title, day)
+    return []
+
+
+def personal_message(person, day):
+    rows = personal_rows(person, day)
+    return format_day_changes(rows, day) if rows else ""
+
+
+def personal_overview(person):
+    today = datetime.now(ZoneInfo(os.getenv("SCHEDULE_TIMEZONE", "Europe/Moscow"))).date().isoformat()
+    return "\n\n".join(filter(None, (personal_message(person, day)
+        for day in sorted(published_dates()) if day >= today))) or "Для тебя пока нет опубликованных замен."
+
+
+def message_parts(message, limit=3500):
+    while message:
+        end = min(len(message), limit)
+        if len(message) > limit:
+            boundary = message.rfind("\n", 0, limit)
+            end = boundary if boundary > 0 else limit
+        yield message[:end]
+        message = message[end:].lstrip("\n")
+
+
+async def notify_changed(days, telegram_bot=None):
+    """Retry undelivered current versions each cycle; mark only successful sends."""
+    from features import db
+    setup_store()
     token = os.getenv("MAX_BOT_TOKEN", "").strip()
     with db() as conn:
         users = [dict(r) for r in conn.execute(
-            "SELECT platform,user_id,group_name FROM users WHERE notifications=1 AND group_name != ''")]
-        has_max = conn.execute("SELECT 1 FROM sqlite_master WHERE name='max_profiles'").fetchone()
-        max_users = [dict(r) for r in conn.execute(
-            "SELECT uid AS user_id,title AS group_name,'max' AS platform "
-            "FROM max_profiles WHERE filename IS NOT NULL AND role='student'")] if has_max else []
-    users += max_users
-    for day in days:
+            "SELECT * FROM users WHERE notifications=1 AND group_name != ''")]
+    for day in sorted(days):
         for person in users:
-            rows = substitutions_for(person["group_name"], day)
-            message = format_group_changes(rows, person["group_name"], day)
-            if not message:
+            with db() as conn:
+                active = conn.execute("SELECT notifications FROM users WHERE platform=? AND user_id=?",
+                    (person["platform"], str(person["user_id"]))).fetchone()
+            if not active or not active["notifications"]:
                 continue
-            checksum = digest(message.encode())
+            message = personal_message(person, day)
             with db() as conn:
                 old = conn.execute(
-                    "SELECT content_hash FROM substitution_deliveries "
-                    "WHERE platform=? AND uid=? AND day=?",
+                    "SELECT content_hash FROM substitution_deliveries WHERE platform=? AND uid=? AND day=?",
                     (person["platform"], str(person["user_id"]), day)).fetchone()
+            if not message:
+                if not old:
+                    continue
+                message = f"🔄 Замены на {day}: ранее опубликованные замены для тебя отменены."
+            checksum = digest(message.encode())
             if old and old["content_hash"] == checksum:
                 continue
             try:
-                if person["platform"] == "telegram" and telegram_bot:
-                    await telegram_bot.send_message(int(person["user_id"]), message)
-                elif person["platform"] == "max" and token:
-                    async with httpx.AsyncClient(
-                        base_url="https://platform-api2.max.ru",
-                        headers={"Authorization": token}, timeout=20
-                    ) as client:
-                        response = await client.post(
-                            "/messages", params={"user_id": int(person["user_id"])},
-                            json={"text": message})
-                        response.raise_for_status()
+                for index, part in enumerate(message_parts(message)):
+                    with db() as conn:
+                        sent = conn.execute("SELECT 1 FROM substitution_parts WHERE platform=? AND uid=? "
+                            "AND day=? AND content_hash=? AND part=?",
+                            (person["platform"], str(person["user_id"]), day, checksum, index)).fetchone()
+                    if sent:
+                        continue
+                    if person["platform"] == "telegram" and telegram_bot:
+                        await telegram_bot.send_message(int(person["user_id"]), part)
+                    elif person["platform"] == "max" and token:
+                        async with httpx.AsyncClient(base_url="https://platform-api2.max.ru",
+                            headers={"Authorization": token}, timeout=20) as client:
+                            response = await client.post("/messages", params={"user_id": int(person["user_id"])},
+                                                         json={"text": part})
+                            response.raise_for_status()
+                            if response.json().get("success") is False:
+                                raise ValueError("MAX rejected notification")
+                    else:
+                        break
+                    with db() as conn:
+                        conn.execute("INSERT OR IGNORE INTO substitution_parts VALUES(?,?,?,?,?)",
+                            (person["platform"], str(person["user_id"]), day, checksum, index))
+                    await asyncio.sleep(0.05)
                 else:
-                    continue
-                with db() as conn:
-                    conn.execute(
-                        "INSERT INTO substitution_deliveries VALUES(?,?,?,?) "
-                        "ON CONFLICT(platform,uid,day) DO UPDATE SET content_hash=excluded.content_hash",
-                        (person["platform"], str(person["user_id"]), day, checksum))
+                    with db() as conn:
+                        conn.execute("INSERT INTO substitution_deliveries VALUES(?,?,?,?) "
+                            "ON CONFLICT(platform,uid,day) DO UPDATE SET content_hash=excluded.content_hash",
+                            (person["platform"], str(person["user_id"]), day, checksum))
+                        conn.execute("DELETE FROM substitution_parts WHERE platform=? AND uid=? AND day=?",
+                            (person["platform"], str(person["user_id"]), day))
             except Exception:
                 import logging
                 logging.getLogger(__name__).exception("Substitution notification failed")
+
+
+async def monitor(telegram_bot=None):
+    """One monitor per database/process host; MAX and web may both start safely."""
+    from features import DB_PATH
+    import logging
+    setup_store()
+    lock = open(str(DB_PATH) + ".substitutions.lock", "a+b")
+    try:
+        try:
+            if os.name == "nt":
+                import msvcrt
+                lock.seek(0)
+                lock.write(b"0")
+                lock.flush()
+                lock.seek(0)
+                msvcrt.locking(lock.fileno(), msvcrt.LK_NBLCK, 1)
+            else:
+                import fcntl
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            logging.getLogger(__name__).info("Another substitution monitor owns this database")
+            return
+        while True:
+            try:
+                await refresh()
+            except Exception:
+                logging.getLogger(__name__).exception("Substitution discovery failed")
+            try:
+                today = datetime.now(ZoneInfo(os.getenv("SCHEDULE_TIMEZONE", "Europe/Moscow"))).date().isoformat()
+                await notify_changed([d for d in published_dates() if d >= today], telegram_bot)
+            except Exception:
+                logging.getLogger(__name__).exception("Substitution delivery failed")
+            await asyncio.sleep(300)
+    finally:
+        lock.close()
