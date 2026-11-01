@@ -112,6 +112,9 @@ async def lifespan(app: FastAPI):
                 BotCommand(command="schedule", description="Расписание картинкой"),
                 BotCommand(command="admin", description="Админ-панель"),
                 BotCommand(command="profile", description="Мой профиль"),
+                BotCommand(command="substitutions", description="Замены в расписании"),
+                BotCommand(command="favorites", description="Избранные расписания"),
+                BotCommand(command="register", description="Изменить основное расписание"),
                 BotCommand(command="notify", description="Включить уведомления"),
                 BotCommand(command="mute", description="Выключить уведомления"),
                 BotCommand(command="help", description="Помощь"),
@@ -129,7 +132,7 @@ async def lifespan(app: FastAPI):
         except Exception:
             logger.exception("Не удалось настроить Telegram webhook")
 
-    substitution_task = asyncio.create_task(substitution_monitor()) if bot else None
+    substitution_task = asyncio.create_task(substitution_monitor()) if bot or os.getenv("MAX_BOT_TOKEN") else None
     monitor = asyncio.create_task(schedule_monitor()) if bot and WEBHOOK_SECRET and WEBAPP_URL.startswith("https://") else None
     yield
     if substitution_task:
@@ -589,16 +592,5 @@ async def schedule_monitor():
 
 
 async def substitution_monitor():
-    """Automatically discover and parse replacement PDFs every five minutes."""
-    from substitutions import refresh, notify_changed, setup_store
-    setup_store()
-    await asyncio.sleep(15)
-    while True:
-        try:
-            days = await refresh()
-            if days:
-                from datetime import date
-                await notify_changed([d for d in days if d >= date.today().isoformat()], bot)
-        except Exception:
-            logger.exception("Substitution monitor failed")
-        await asyncio.sleep(300)
+    from substitutions import monitor
+    await monitor(bot)

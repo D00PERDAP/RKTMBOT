@@ -3,12 +3,14 @@
 Production deployments should switch to MAX webhooks per official guidance.
 """
 import asyncio
+from datetime import datetime, timedelta
+from collections import OrderedDict
+import hashlib
+from html import escape
+from zoneinfo import ZoneInfo
 from contextvars import ContextVar
-import html
 import logging
 import os
-import re
-from html.parser import HTMLParser
 from pathlib import Path
 from urllib.parse import urljoin
 
@@ -19,7 +21,7 @@ from dotenv import load_dotenv
 load_dotenv(Path(__file__).resolve().parent / ".env")
 from app import GroupParser, SCHEDULE_BASE, SCHEDULE_URLS, fetch_html
 from bot_flow import schedule_text_parts, today_schedule_day
-from features import db, initialize, news_list
+from features import db, initialize, news_list, save_user, user
 
 API = "https://platform-api2.max.ru"
 TOKEN = os.getenv("MAX_BOT_TOKEN", "").strip()
@@ -46,6 +48,12 @@ def init_max():
         cols = {row["name"] for row in conn.execute("PRAGMA table_info(max_profiles)")}
         if "role" not in cols:
             conn.execute("ALTER TABLE max_profiles ADD COLUMN role TEXT")
+        # Preserve existing explicit subscriptions, including muted profiles.
+        conn.execute("INSERT OR IGNORE INTO users(platform,user_id,source,filename,group_name,notifications) "
+                     "SELECT 'max',uid,source,filename,title,1 FROM max_profiles WHERE filename IS NOT NULL")
+    from substitutions import setup_store
+    setup_store()
+
 
 
 def clean_html(text):
@@ -72,25 +80,56 @@ def kb(rows):
 
 
 def home_buttons():
-    return kb([
-        [("📅 Моё расписание", "/today"), ("🔎 Все расписания", "/browse")],
-        [("🔄 Замены", "/substitutions"), ("⭐ Избранное", "/favorites")],
-        [("👤 Профиль", "/profile")],
-        [("📰 Новости", "/news"), ("🏠 Меню", "/start")],
-    ])
+    return kb([[("📅 Моё расписание","/today"),("🔄 Замены","/substitutions")],
+               [("👤 Профиль","/profile"),("☰ Ещё","/more")]])
+
+
+def back_home():
+    return kb([[("🏠 Главное меню", "/start")]])
+
+
+def profile_label(p):
+    kind = "Преподаватель" if p["source"] == "Praspisan" else "Группа"
+    return f"{kind}: {p['title'].rstrip(' ,')}"
+
+
+def notification_enabled(uid):
+    return bool((user("max", uid) or {}).get("notifications"))
+
+
+async def show_home(client, uid):
+    p = profile(uid)
+    if not p:
+        await ask_registration(client, uid)
+        return
+    status = "включены 🔔" if notification_enabled(uid) else "выключены 🔕"
+    await send(client, uid,
+               f"📚 РКТМ · Главное меню\n\n{profile_label(p)}\n"
+               f"Уведомления о заменах: {status}\n\nЧто посмотреть?", home_buttons())
+
+
+async def show_settings(client, uid, notice=""):
+    if not profile(uid):
+        await ask_registration(client, uid)
+        return
+    enabled = notification_enabled(uid)
+    action = ("🔕 Выключить уведомления", "/mute") if enabled else ("🔔 Включить уведомления", "/notify")
+    await send(client, uid, "🔔 Уведомления о заменах\n\n"
+        + (notice + "\n\n" if notice else "")
+        + ("Сейчас включены.\n" if enabled else "Сейчас выключены.\n")
+        + "Бот сообщает о публикациях и исправлениях замен для твоей группы или преподавателя.\n\n"
+        + "Расписание и замены доступны в меню при любом режиме уведомлений.",
+        kb([[action], [("👤 Профиль", "/profile"), ("🏠 Главное меню", "/start")]]))
 
 
 async def send(client, user_id, text, keyboard=None):
     """Edit the pressed menu in place; send normally for typed commands."""
     target = EDIT_TARGET.get()
-    remaining = text or " "
+    from substitutions import message_parts
+    chunks = list(message_parts(text or " "))
     first = True
-    while remaining:
-        chunk = remaining[:3500]
-        if len(remaining) > 3500 and "\\n" in chunk:
-            chunk = chunk[:chunk.rfind("\\n")] or chunk
-        remaining = remaining[len(chunk):].lstrip("\\n")
-        payload = {"text": chunk, "attachments": [keyboard] if keyboard and not remaining else []}
+    for index, chunk in enumerate(chunks):
+        payload = {"text": chunk, "attachments": [keyboard] if keyboard and index == len(chunks) - 1 else []}
         if target and first:
             try:
                 response = await client.put(
@@ -110,55 +149,139 @@ async def send(client, user_id, text, keyboard=None):
             json=payload, timeout=25,
         )
         response.raise_for_status()
+        if response.json().get("success") is False:
+            raise ValueError("MAX rejected message")
         first = False
 
 
+_IMAGE_TOKENS = OrderedDict()
+
+
+async def upload_image(client, image):
+    key = hashlib.sha256(image).hexdigest()
+    if key in _IMAGE_TOKENS:
+        _IMAGE_TOKENS.move_to_end(key)
+        return _IMAGE_TOKENS[key]
+    response = await client.post("/uploads", params={"type":"image"})
+    response.raise_for_status()
+    upload_url = response.json()["url"]
+    if not upload_url.startswith("https://"):
+        raise ValueError("MAX returned an invalid upload URL")
+    # The signed upload URL supplies its own credentials; do not forward the bot token.
+    request = client.build_request("POST", upload_url,
+        files={"data":("schedule.png", image, "image/png")}, timeout=45)
+    request.headers.pop("Authorization", None)
+    uploaded = await client.send(request)
+    uploaded.raise_for_status()
+    data = uploaded.json()
+    token = data.get("token")
+    if not token:
+        token = next((photo.get("token") for photo in data.get("photos", {}).values()
+                      if isinstance(photo,dict) and photo.get("token")), None)
+    if not token:
+        raise ValueError("MAX did not return an image token")
+    _IMAGE_TOKENS[key] = token
+    while len(_IMAGE_TOKENS) > 32:
+        _IMAGE_TOKENS.popitem(last=False)
+    return token
+
+
+async def image_request(client, method, params, payload):
+    for attempt in range(4):
+        response = await client.request(method, "/messages", params=params, json=payload, timeout=25)
+        data = response.json()
+        if data.get("code") == "attachment.not.ready" and attempt < 3:
+            await asyncio.sleep(0.5 * 2**attempt)
+            continue
+        if response.is_error:
+            _IMAGE_TOKENS.clear()
+        response.raise_for_status()
+        if data.get("success") is False or data.get("code") == "attachment.not.ready":
+            _IMAGE_TOKENS.clear()
+            raise ValueError("MAX could not send the image")
+        return
+
+
+async def send_photo_pages(client, uid, pages, keyboard, title, page=0):
+    """Upload and display just the selected leaf, replacing the current photo."""
+    page = min(max(0,page),len(pages)-1)
+    token = await upload_image(client,pages[page])
+    caption = f"📅 {title.rstrip(' ,')}"[:850]
+    if len(pages)>1:
+        caption += f" · Лист {page+1}/{len(pages)}"
+    payload = {"text":caption,"attachments":[{"type":"image","payload":{"token":token}},keyboard]}
+    target = EDIT_TARGET.get()
+    if target:
+        try:
+            await image_request(client,"PUT",{"message_id":target},{**payload,"notify":False})
+            return
+        except (httpx.HTTPStatusError,ValueError):
+            log.info("Cannot replace MAX photo screen; sending new photo")
+    await image_request(client,"POST",{"user_id":int(uid)},payload)
+
+
 async def ask_registration(client, uid):
-    await send(client, uid, "👋 Добро пожаловать в РКТМ!\\n\\nКто ты?",
-               kb([[("🎓 Студент", "/reg_student"), ("👨‍🏫 Преподаватель", "/reg_teacher")]]))
+    rows = [[("🎓 Я студент", "/reg_student")], [("👨‍🏫 Я преподаватель", "/reg_teacher")]]
+    if profile(uid):
+        rows.append([("⬅️ Главное меню", "/start")])
+    await send(client, uid, "📚 РКТМ · Расписание и замены\n\n"
+        "Выбери, чьё расписание сохранить в профиле.\n"
+        "Так бот сможет показывать твои занятия и присылать нужные замены.", kb(rows))
 
 
 async def catalog(client, uid, source, page=0):
-    html_text = await fetch_html(SCHEDULE_URLS[source])
-    parser = GroupParser()
-    parser.feed(html_text)
-    items = parser.groups
-    if not items:
-        await send(client, uid, "Список расписаний пока пуст.")
-        return
-    page = min(max(page, 0), (len(items)-1)//10)
-    with db() as conn:
-        conn.execute(
-            "INSERT INTO max_states(uid,source,page) VALUES(?,?,?) "
-            "ON CONFLICT(uid) DO UPDATE SET source=excluded.source,page=excluded.page",
-            (uid, source, page),
-        )
-    rows = [f"{i+1}. {item['name']}" for i, item in enumerate(items[page*10:page*10+10])]
-    title = "Группы" if source == "raspisan" else "Преподаватели"
-    await send(client, uid, f"{title} — страница {page+1}/{(len(items)+9)//10}\n"
-               + "\n".join(rows)
-               + "\n\nОтправь номер для выбора, /next или /prev для страниц."
-               + "\nВыбери расписание кнопкой:",
-               kb([[(f"{page*10+i+1}. {item['name']}"[:60], f"/pick {i+1}")] for i,item in enumerate(items[page*10:page*10+10])]
-                  + [[("◀️", "/prev"), ("▶️", "/next")],
-                     [("🎓 Группы", "/groups"), ("👨‍🏫 Преподаватели", "/teachers")],
-                     [("🏠 Главное меню", "/start")]]))
-
-
-async def choose(client, uid, number):
-    state = current_state(uid)
-    if not state:
-        await send(client, uid, "Сначала выбери /groups или /teachers.")
-        return
-    source = state["source"]
-    page = state["page"]
     parser = GroupParser()
     parser.feed(await fetch_html(SCHEDULE_URLS[source]))
-    idx = page * 10 + number - 1
-    if not 1 <= number <= 10 or idx >= len(parser.groups):
-        await send(client, uid, "Такого номера нет на этой странице.")
+    items = parser.groups
+    title = "🎓 Выбери группу" if source == "raspisan" else "👨‍🏫 Выбери преподавателя"
+    if not items:
+        await send(client, uid, title + "\n\nНа сайте пока нет списка. Попробуй обновить его позже.",
+            kb([[("🔄 Обновить список", "/groups" if source == "raspisan" else "/teachers")],
+                [("⬅️ Назад", "/browse"), ("🏠 Главное меню", "/start")]]))
         return
-    item = parser.groups[idx]
+    pages = (len(items) + 9) // 10
+    page = min(max(page, 0), pages - 1)
+    with db() as conn:
+        conn.execute("INSERT INTO max_states(uid,source,page) VALUES(?,?,?) "
+            "ON CONFLICT(uid) DO UPDATE SET source=excluded.source,page=excluded.page", (uid, source, page))
+    rows = [[(item["name"][:60], f"/select {source} {item['file']}")]
+            for item in items[page*10:page*10+10]]
+    navigation = []
+    if page:
+        navigation.append(("← Назад", f"/catalog {source} {page-1}"))
+    if page + 1 < pages:
+        navigation.append(("Далее →", f"/catalog {source} {page+1}"))
+    if navigation:
+        rows.append(navigation)
+    rows.append([("⬅️ К категориям", "/browse"), ("🏠 Главное меню", "/start")])
+    await send(client, uid, f"{title}\n\nСтраница {page+1} из {pages}\n"
+        "Нажми на имя в списке ниже. Выбор сохранится в твоём профиле.\n"
+        "Режим уведомлений при смене выбора сохранится.", kb(rows))
+
+
+async def choose(client, uid, number=None, source=None, filename=None):
+    if source is None:
+        state = current_state(uid)
+        if not state:
+            await ask_registration(client, uid)
+            return
+        source = state["source"]
+    if source not in SOURCES.values():
+        await ask_registration(client, uid)
+        return
+    parser = GroupParser()
+    parser.feed(await fetch_html(SCHEDULE_URLS[source]))
+    if filename is not None:
+        item = next((item for item in parser.groups if item["file"] == filename), None)
+    else:
+        state = current_state(uid)
+        idx = state["page"] * 10 + (number or 0) - 1
+        item = parser.groups[idx] if number and 1 <= number <= 10 and 0 <= idx < len(parser.groups) else None
+    if not item:
+        await send(client, uid, "Список изменился. Открой его заново и выбери расписание.",
+                   kb([[("🔄 Открыть список", "/groups" if source == "raspisan" else "/teachers")],
+                       [("🏠 Главное меню", "/start")]]))
+        return
     with db() as conn:
         conn.execute(
             "INSERT INTO max_profiles(uid,source,filename,title,role) VALUES(?,?,?,?,?) "
@@ -166,56 +289,109 @@ async def choose(client, uid, number):
             "filename=excluded.filename,title=excluded.title,role=excluded.role",
             (uid, source, item["file"], item["name"], "teacher" if source=="Praspisan" else "student"),
         )
-    await show_schedule(client, uid)
+        conn.execute("INSERT INTO users(platform,user_id,source,filename,group_name,notifications) "
+            "VALUES('max',?,?,?,?,1) ON CONFLICT(platform,user_id) DO UPDATE SET "
+            "source=excluded.source,filename=excluded.filename,group_name=excluded.group_name",
+            (str(uid), source, item["file"], item["name"]))
+    await send(client, uid, "✅ Расписание сохранено\n\n" + profile_label({"source":source,"title":item["name"]})
+        + "\n\nТеперь можно посмотреть занятия и свои замены.",
+        kb([[("📅 Моё расписание", "/today")], [("🔄 Мои замены", "/subsmine")],
+            [("👤 Профиль", "/profile"), ("🏠 Главное меню", "/start")]]))
 
 
-async def show_schedule(client, uid, day=None):
-    p = profile(uid)
+async def show_schedule(client, uid, day=None, selected=None, page=0):
+    p = selected or profile(uid)
     if not p or not p["filename"]:
-        await send(client, uid, "Расписание не выбрано. Открой /groups или /teachers.")
+        await ask_registration(client, uid)
         return
     if day is None:
         day = today_schedule_day()
     if day == 6:
-        text = f"{p['title']} — воскресенье\nСегодня выходной, уроков нет."
+        parts = [f"📅 {escape(p['title'])} · Воскресенье\nВоскресенье — выходной, уроков нет."]
+        text = "\n\n".join(clean_html(part) for part in parts)
     else:
         if day not in range(6):
             await send(client, uid, "День недели: от 0 (пн) до 5 (сб).")
             return
         schedule = await fetch_html(urljoin(SCHEDULE_BASE, p["filename"]))
-        text = "\n\n".join(clean_html(part) for part in schedule_text_parts(p["title"], schedule, day))
-    from substitutions import substitutions_for, format_group_changes
-    from datetime import datetime, timedelta
-    from zoneinfo import ZoneInfo
+        parts = schedule_text_parts(p["title"], schedule, day)
+        text = "\n\n".join(clean_html(part) for part in parts)
+    from substitutions import personal_message
     local_today = datetime.now(ZoneInfo(os.getenv("SCHEDULE_TIMEZONE", "Europe/Moscow"))).date()
     target_date = (local_today + timedelta(days=(day - local_today.weekday()) % 7)).isoformat()
-    changes = substitutions_for(p["title"], target_date) if p["source"] == "raspisan" else []
+    changes = personal_message(p, target_date)
     if changes:
-        text += "\n\n" + format_group_changes(changes, p["title"], target_date)
-    await send(client, uid, text + "\n\nВыбери день:",
-               kb([[("Пн", "/day 0"), ("Вт", "/day 1"), ("Ср", "/day 2")],
-                   [("Чт", "/day 3"), ("Пт", "/day 4"), ("Сб", "/day 5")],
-                   [("📅 Сегодня", "/today"), ("⭐ Сохранить", "/save")],
-                   [("🔎 Все расписания", "/browse"), ("🏠 Меню", "/start")]]))
+        text += "\n\n" + changes
+    def controls(page=0,total=1):
+        labels = ("Пн","Вт","Ср","Чт","Пт","Сб","Вс")
+        origin = "f" if selected else "p"
+        def action(day,page):
+            return f"/sheet {p['source']} {p['filename']} {day} {page} {origin}"
+        previous,following = (day-1)%7,(day+1)%7
+        rows = [[(f"← {labels[previous]}",action(previous,0)),
+                 ("Сегодня",action(today_schedule_day(),0)),
+                 (f"{labels[following]} →",action(following,0))]]
+        pager = []
+        if page:
+            pager.append(("← Лист",action(day,page-1)))
+        if page+1<total:
+            pager.append(("Лист →",action(day,page+1)))
+        if pager:
+            rows.append(pager)
+        rows.append([("⬅️ Избранное","/favorites")] if selected else [("🏠 Меню","/start")])
+        return kb(rows)
+    if selected:
+        text = "⭐ Избранное · Просмотр\n\n"+text
+    try:
+        from schedule_images import daily_images
+        pages = await daily_images(p["title"],parts,changes)
+        page = min(max(0,page),len(pages)-1)
+        await send_photo_pages(client,uid,pages,controls(page,len(pages)),p["title"],page=page)
+    except Exception:
+        log.exception("MAX schedule image unavailable; using text")
+        await send(client,uid,"📋 Текстовая версия расписания\n\n"+text,controls())
 
 
 async def handle(client, uid, text):
     text = (text or "").strip()
     command = text.lower().split()[0] if text else ""
-    if command in ("/start", "/help", "меню") and not profile(uid):
-        await ask_registration(client, uid)
+    if command in ("/start", "меню"):
+        await show_home(client, uid)
+    elif command == "/more":
+        await send(client,uid,"☰ Ещё\n\nДополнительные разделы",
+            kb([[("🔎 Выбрать расписание","/browse"),("⭐ Избранное","/favorites")],
+                [("🔔 Уведомления","/settings"),("📰 Новости","/news")],
+                [("❔ Помощь","/help")],[("🏠 Меню","/start")]]))
+    elif command == "/help":
+        await send(client, uid, "❔ Как пользоваться ботом\n\n"
+            "1. Выбери свою группу или преподавателя.\n"
+            "2. Открой «Моё расписание» и нужный день недели.\n"
+            "3. В «Моих заменах» будут изменения, которые относятся к тебе.\n\n"
+            "В разделе «Замены» доступны «Мои замены», «Сегодня» и «Завтра».\n"
+            "Управлять подпиской можно в разделе «Уведомления».",
+            kb([[("🔎 Выбрать расписание", "/browse")], [("🏠 Главное меню", "/start")]]))
     elif command in ("/reg_student", "/reg_teacher"):
         await catalog(client, uid, "raspisan" if command=="/reg_student" else "Praspisan")
-    elif command in ("/start", "/help", "меню"):
-        await send(client, uid, "📚 РКТМ | Главное меню\n\nВыбери нужный раздел 👇",
-                   home_buttons())
     elif command == "/register":
         await ask_registration(client, uid)
     elif command == "/browse":
-        await send(client, uid, "🔎 Все расписания\\nВыбери категорию:",
-                   kb([[("🎓 Группы", "/groups")],
-                       [("👨‍🏫 Преподаватели", "/teachers")],
-                       [("🏠 Меню", "/start")]]))
+        await send(client, uid, "🔎 Выбрать своё расписание\n\n"
+            "Студентам — список групп. Преподавателям — список фамилий.\n"
+            "Текущий выбор изменится только после нажатия на группу или имя.",
+            kb([[("🎓 Группы", "/groups")], [("👨‍🏫 Преподаватели", "/teachers")],
+                [("🏠 Главное меню", "/start")]]))
+    elif command == "/select":
+        parts = text.split()
+        if len(parts) == 3 and parts[1] in SOURCES.values():
+            await choose(client, uid, source=parts[1], filename=parts[2])
+        else:
+            await ask_registration(client, uid)
+    elif command == "/catalog":
+        parts = text.split()
+        if len(parts) == 3 and parts[1] in SOURCES.values() and parts[2].isdigit():
+            await catalog(client, uid, parts[1], int(parts[2]))
+        else:
+            await ask_registration(client, uid)
     elif command == "/pick":
         parts = text.split()
         if len(parts) == 2 and parts[1].isdigit():
@@ -231,9 +407,27 @@ async def handle(client, uid, text):
         if s:
             await catalog(client, uid, s["source"], s["page"] + (1 if command == "/next" else -1))
         else:
-            await send(client, uid, "Сначала открой /groups или /teachers.")
+            await send(client, uid, "Сначала выбери группу или преподавателя в разделе «Выбрать расписание».")
     elif command in ("/today", "/schedule"):
         await show_schedule(client, uid)
+    elif command == "/sheet":
+        parts = text.split()
+        if len(parts)!=6 or parts[1] not in SOURCES.values() or parts[3] not in tuple(map(str,range(7))) or not parts[4].isdigit() or parts[5] not in ("p","f"):
+            await send(client,uid,"Открой расписание заново.",back_home())
+            return
+        if parts[5]=="p":
+            p = profile(uid)
+            if not p or p["source"]!=parts[1] or p["filename"]!=parts[2]:
+                await send(client,uid,"Основное расписание изменилось. Открой его из меню.",back_home())
+                return
+            await show_schedule(client,uid,day=int(parts[3]),page=int(parts[4]))
+        else:
+            with db() as conn:
+                selected = conn.execute("SELECT source,filename,title FROM max_favorites WHERE uid=? AND source=? AND filename=?",(str(uid),parts[1],parts[2])).fetchone()
+            if selected:
+                await show_schedule(client,uid,day=int(parts[3]),selected=dict(selected),page=int(parts[4]))
+            else:
+                await send(client,uid,"Этого расписания уже нет в избранном.",back_home())
     elif command == "/day":
         parts = text.split()
         if len(parts) != 2 or parts[1] not in [str(x) for x in range(6)]:
@@ -241,53 +435,46 @@ async def handle(client, uid, text):
         else:
             await show_schedule(client, uid, int(parts[1]))
     elif command == "/substitutions":
-        await send(client, uid, "🔄 Замены — выбери раздел:",
-                   kb([[("👤 Мои замены", "/subsmine")],
-                       [("📆 Замены на день", "/subsdates")],
-                       [("🏠 Меню", "/start")]]))
+        await handle(client,uid,"/subsdates")
     elif command == "/subsmine":
-        from substitutions import substitutions_for, format_group_changes
-        from datetime import datetime, timedelta
-        from zoneinfo import ZoneInfo
+        from substitutions import personal_overview
         p = profile(uid)
-        if not p or not p["filename"] or p["source"] != "raspisan":
-            await send(client, uid, "Сначала выбери свою группу.", home_buttons())
-            return
-        today = datetime.now(ZoneInfo(os.getenv("SCHEDULE_TIMEZONE", "Europe/Moscow"))).date()
-        messages = []
-        for delta in range(8):
-            day = (today + timedelta(days=delta)).isoformat()
-            changes = substitutions_for(p["title"], day)
-            if changes:
-                messages.append(format_group_changes(changes, p["title"], day))
-        await send(client, uid, "\n\n".join(messages) if messages else
-                   "Для твоей группы пока нет опубликованных замен на ближайшие дни.",
+        await send(client, uid, "🔄 Мои замены\n\n" + profile_label(p) + "\n\n" + personal_overview(p) if p else "Выбери группу или преподавателя, чтобы увидеть свои замены.",
                    kb([[("⬅️ Назад", "/substitutions")]]))
     elif command == "/subsdates":
-        from datetime import datetime, timedelta
-        from zoneinfo import ZoneInfo
-        today = datetime.now(ZoneInfo(os.getenv("SCHEDULE_TIMEZONE", "Europe/Moscow"))).date()
-        rows = [[((today + timedelta(days=i)).strftime("%d.%m"), f"/subsday {i}")]
-                for i in range(8)]
-        rows.append([("⬅️ Назад", "/substitutions")])
-        await send(client, uid, "📆 Выбери день:", kb(rows))
+        from substitutions import relevant_days,display_date
+        rows = [[(f"{label} · {display_date(day)}",f"/subsday {day}")]
+                for label,day in zip(("Сегодня","Завтра"),relevant_days())]
+        rows += [[("👤 Мои замены","/subsmine")],[("🏠 Меню","/start")]]
+        await send(client,uid,"📆 Замены на день\n\nВыбери сегодня или завтра. Если замены ещё не опубликованы, бот сообщит об этом.",kb(rows))
     elif command == "/subsday":
-        from datetime import datetime, timedelta
-        from zoneinfo import ZoneInfo
-        from substitutions import substitutions_on, format_day_changes
+        from substitutions import relevant_days,substitutions_on,format_day_changes
         parts = text.split()
-        if len(parts) != 2 or not parts[1].isdigit() or int(parts[1]) not in range(8):
-            await send(client, uid, "Выбери дату через «Замены на день».")
+        if len(parts)!=2 or parts[1] not in relevant_days():
+            await handle(client,uid,"/subsdates")
             return
-        day = (datetime.now(ZoneInfo(os.getenv("SCHEDULE_TIMEZONE", "Europe/Moscow"))).date()
-               + timedelta(days=int(parts[1]))).isoformat()
-        await send(client, uid, format_day_changes(substitutions_on(day), day),
-                   kb([[("⬅️ К датам", "/subsdates")]]))
+        await send(client,uid,format_day_changes(substitutions_on(parts[1]),parts[1]),
+                   kb([[("⬅️ Сегодня / завтра","/subsdates")],[("🏠 Меню","/start")]]))
+    elif command == "/settings":
+        await show_settings(client, uid)
+    elif command in ("/notify", "/mute"):
+        p = profile(uid)
+        if not p:
+            await ask_registration(client, uid)
+            return
+        save_user("max", uid, p["source"], p["filename"], p["title"], command == "/notify")
+        await show_settings(client, uid, "✅ Настройка сохранена.")
     elif command == "/profile":
         p = profile(uid)
-        await send(client, uid, "👤 Профиль\\nРоль: " + ("Преподаватель" if p and p.get("role")=="teacher" else "Студент") + "\\nТвоё расписание: " + (p["title"] if p else "не выбрано"),
-                   kb([[("🔄 Изменить группу / преподавателя", "/register")],
-                       [("🏠 Меню", "/start")]]))
+        if not p:
+            await ask_registration(client, uid)
+            return
+        role = "Преподаватель" if p["source"] == "Praspisan" else "Студент"
+        status = "включены 🔔" if notification_enabled(uid) else "выключены 🔕"
+        await send(client, uid, f"👤 Мой профиль\n\nРоль: {role}\n{profile_label(p)}\n"
+            f"Уведомления о заменах: {status}\n\nВыбор расписания можно изменить кнопкой ниже.",
+            kb([[("🔎 Изменить расписание", "/register")], [("🔔 Настроить уведомления", "/settings")],
+                [("🏠 Главное меню", "/start")]]))
     elif command == "/save":
         p = profile(uid)
         if not p:
@@ -296,21 +483,48 @@ async def handle(client, uid, text):
             with db() as conn:
                 conn.execute("INSERT OR IGNORE INTO max_favorites VALUES (?,?,?,?)",
                              (uid, p["source"], p["filename"], p["title"]))
-            await send(client, uid, "⭐ Добавлено в избранное.", home_buttons())
+            await send(client, uid, "✅ Добавлено в избранное\n\n" + profile_label(p),
+                       kb([[("⭐ Открыть избранное", "/favorites")], [("📅 Моё расписание", "/today"), ("🏠 Главное меню", "/start")]]))
     elif command == "/favorites":
         with db() as conn:
-            items = conn.execute("SELECT title FROM max_favorites WHERE uid=? ORDER BY title", (uid,)).fetchall()
-        await send(client, uid, "⭐ Избранное:\n" + ("\n".join(x["title"] for x in items) if items else "Пока пусто."), home_buttons())
+            items = conn.execute("SELECT source,filename,title FROM max_favorites WHERE uid=? ORDER BY title", (uid,)).fetchall()
+        parts = text.split()
+        pages = max(1, (len(items) + 9) // 10)
+        page = min(int(parts[1]) if len(parts) == 2 and parts[1].isdigit() else 0, pages - 1)
+        rows = [[(f"⭐ {item['title']}"[:60], f"/favorite {item['source']} {item['filename']}")] for item in items[page*10:page*10+10]]
+        navigation = []
+        if page:
+            navigation.append(("← Назад", f"/favorites {page-1}"))
+        if page + 1 < pages:
+            navigation.append(("Далее →", f"/favorites {page+1}"))
+        if navigation:
+            rows.append(navigation)
+        rows += [[("📅 Моё расписание", "/today"), ("🏠 Главное меню", "/start")]]
+        await send(client, uid, "⭐ Избранное\n\n" + ("Нажми на расписание, чтобы открыть его.\nТвой основной профиль останется прежним." if items else
+            "Здесь пока пусто.\nОткрой своё расписание и нажми «В избранное»."), kb(rows))
+    elif command in ("/favorite", "/favday"):
+        parts = text.split()
+        if (command == "/favorite" and len(parts) != 3) or (command == "/favday" and (len(parts) != 4 or parts[3] not in tuple(map(str, range(6))))):
+            await send(client, uid, "Выбери расписание в избранном.", kb([[("⭐ Избранное", "/favorites")]]))
+            return
+        with db() as conn:
+            item = conn.execute("SELECT source,filename,title FROM max_favorites WHERE uid=? AND source=? AND filename=?",
+                                (str(uid),parts[1],parts[2])).fetchone()
+        if item:
+            await show_schedule(client, uid, int(parts[3]) if command == "/favday" else None, selected=dict(item))
+        else:
+            await send(client, uid, "Этого расписания уже нет в избранном.", kb([[("⭐ Открыть избранное", "/favorites")]]))
     elif command == "/news":
         posts = news_list()[:5]
-        await send(client, uid, "\n\n".join(x["title"] + "\n" + x["body"] for x in posts) if posts else "Новостей пока нет.", home_buttons())
+        await send(client, uid, "📰 Новости РКТМ\n\n" + ("\n\n".join(x["title"] + "\n" + x["body"] for x in posts) if posts else "Новых публикаций пока нет."), kb([[("⬅️ Ещё","/more"),("🏠 Меню","/start")]]))
     elif text.isdigit():
         await choose(client, uid, int(text))
     else:
-        await send(client, uid, "Неизвестная команда. Отправь /help.")
+        await send(client, uid, "Не удалось распознать сообщение.\nВыбери раздел кнопками или открой помощь.",
+                   kb([[("🏠 Главное меню", "/start"), ("❔ Помощь", "/help")]]))
 
 
-async def run():
+async def poll():
     if not TOKEN:
         raise RuntimeError("MAX_BOT_TOKEN не задан в .env")
     init_max()
@@ -354,12 +568,32 @@ async def run():
                             await handle(client, uid, message)
                         except Exception:
                             log.exception("Failed to handle MAX message for user %s", uid)
+                            try:
+                                await send(client, uid, "Сейчас не удалось загрузить данные. Попробуй ещё раз немного позже.", back_home())
+                            except Exception:
+                                log.exception("Could not send MAX error screen")
                         finally:
                             EDIT_TARGET.reset(token)
                 marker = data.get("marker", marker)
             except (httpx.HTTPError, ValueError):
                 log.exception("MAX polling error, retrying")
                 await asyncio.sleep(5)
+
+
+async def run():
+    from substitutions import monitor
+    init_max()
+    # When Telegram is configured the web service owns both platforms' notifications.
+    task = asyncio.create_task(monitor()) if not os.getenv("BOT_TOKEN", "").strip() else None
+    try:
+        await poll()
+    finally:
+        if task:
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
 
 
 if __name__ == "__main__":

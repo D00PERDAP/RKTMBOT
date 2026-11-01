@@ -13,7 +13,7 @@ from urllib.parse import urljoin
 from aiogram import F, Router
 from aiogram.filters import Command, CommandStart
 from aiogram.types import (
-    BufferedInputFile, CallbackQuery, InlineKeyboardButton,
+    BufferedInputFile, InputMediaPhoto, CallbackQuery, InlineKeyboardButton,
     InlineKeyboardMarkup, KeyboardButton, Message, ReplyKeyboardMarkup,
 )
 from features import db, save_user, user
@@ -98,16 +98,18 @@ async def show_screen(message, text, *, edit=False, **kwargs):
                 c.execute("INSERT INTO bot_screen_messages(chat_id,message_id) VALUES (?,?) ON CONFLICT(chat_id) DO UPDATE SET message_id=excluded.message_id",
                           (str(chat_id), message.message_id))
             return edited
-        except Exception:
+        except Exception as error:
+            if "message is not modified" in str(error).lower():
+                return message
             log.debug("Screen edit unavailable; replacing message", exc_info=True)
     with db() as c:
         old = c.execute("SELECT message_id FROM bot_screen_messages WHERE chat_id=?", (str(chat_id),)).fetchone()
-    if old:
+    sent = await message.answer(text, **kwargs)
+    if old and old["message_id"] != sent.message_id:
         try:
             await message.bot.delete_message(chat_id, old["message_id"])
         except Exception:
             log.debug("Old screen could not be deleted", exc_info=True)
-    sent = await message.answer(text, **kwargs)
     # Telegram reply keyboard belongs to a chat message. Deleting that message
     # later can make the persistent bottom keyboard disappear in some clients.
     # Keep keyboard-bearing messages outside the replaceable screen lifecycle.
@@ -129,19 +131,80 @@ def buttons(rows):
 
 
 def keyboard(uid):
-    rows = [
-        [KeyboardButton(text="📅 Моё расписание"), KeyboardButton(text="🔎 Все расписания")],
-        [KeyboardButton(text="🔄 Замены"), KeyboardButton(text="⭐ Избранное")],
-        [KeyboardButton(text="👤 Профиль"), KeyboardButton(text="🔔 Уведомления")],
-        [KeyboardButton(text="📰 Новости")],
-    ]
-    if str(uid) in ADMIN_IDS:
-        rows.append([KeyboardButton(text="🔐 Админ-панель")])
-    return ReplyKeyboardMarkup(keyboard=rows, resize_keyboard=True, is_persistent=True)
+    labels = [["📅 Моё расписание", "🔄 Замены"], ["👤 Профиль", "☰ Ещё"]]
+    return ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text=text) for text in row] for row in labels],
+                               resize_keyboard=True, is_persistent=True)
+
+
+def home_button():
+    return [("🏠 Главное меню", "ui:home")]
 
 
 def catalog_keyboard():
-    return buttons([[("🎓 Расписания групп", "cat:s:0")], [("👨‍🏫 Расписания преподавателей", "cat:t:0")]])
+    return buttons([[("🎓 Расписания групп", "cat:s:0")],
+                    [("👨‍🏫 Расписания преподавателей", "cat:t:0")], home_button()])
+
+
+def profile_line(p):
+    return ("Преподаватель: " if p["source"] == "Praspisan" else "Группа: ") + p["group_name"].rstrip(" ,")
+
+
+async def show_home(message, uid=None):
+    uid = str(uid if uid is not None else message.from_user.id)
+    set_state(uid, None)
+    p = user("telegram", uid)
+    if not p or not p["filename"]:
+        await ask_role(message)
+        return
+    status = "включены 🔔" if p["notifications"] else "выключены 🔕"
+    await show_screen(message, f"📚 РКТМ · Главное меню\n\n{profile_line(p)}\n"
+        f"Уведомления о заменах: {status}\n\nВыбери раздел кнопками внизу.", reply_markup=keyboard(uid))
+
+
+async def show_settings(message, uid, edit=False):
+    p = user("telegram", uid)
+    if not p:
+        await ask_role(message)
+        return
+    enabled = bool(p["notifications"])
+    toggle = ("🔕 Выключить уведомления", "ui:notify:off") if enabled else ("🔔 Включить уведомления", "ui:notify:on")
+    await show_screen(message, "🔔 Уведомления\n\n" + ("Сейчас включены." if enabled else "Сейчас выключены.")
+        + "\n\nБот сообщает об изменениях расписания и заменах для твоего выбора.\n"
+        "Расписание и замены доступны в меню при любом режиме уведомлений.",
+        edit=edit, reply_markup=buttons([[toggle], [("👤 Профиль", "ui:profile")], home_button()]))
+
+
+async def show_more(message, uid, edit=False):
+    rows = [[("🔎 Все расписания", "browse"), ("⭐ Избранное", "ui:favorites")],
+            [("🔔 Уведомления", "ui:settings"), ("📰 Новости", "ui:news")],
+            [("❔ Помощь", "ui:help")], home_button()]
+    if str(uid) in ADMIN_IDS:
+        rows.insert(-1,[("🔐 Админ-панель", "ui:admin")])
+    await show_screen(message,"☰ Ещё\n\nДополнительные разделы",edit=edit,reply_markup=buttons(rows))
+
+
+async def show_news(message, edit=False):
+    from features import news_list
+    from substitutions import message_parts
+    posts = news_list()[:3]
+    content = "📰 Новости РКТМ\n\n" + ("\n\n".join(p["title"]+"\n"+p["body"] for p in posts) if posts else "Новых публикаций пока нет.")
+    chunks = list(message_parts(content))
+    for index,chunk in enumerate(chunks):
+        markup = buttons([home_button()]) if index==len(chunks)-1 else None
+        if index==0:
+            await show_screen(message,chunk,edit=edit,reply_markup=markup)
+        else:
+            await message.answer(chunk,reply_markup=markup)
+
+
+async def show_help(message, edit=False):
+    await show_screen(message, "❔ Как пользоваться ботом\n\n"
+        "1. Выбери свою группу или преподавателя.\n"
+        "2. Открой «Моё расписание» — бот пришлёт карточки с занятиями.\n"
+        "3. Переключай дни кнопками под расписанием.\n\n"
+        "В разделе «Замены»: «Мои замены» — для тебя, «Сегодня» и «Завтра» — для всех групп.\n"
+        "В профиле можно изменить основной выбор, в уведомлениях — включить или выключить подписку.",
+        edit=edit, reply_markup=buttons([[("🔎 Все расписания", "browse")], home_button()]))
 
 
 def hash_password(password):
@@ -152,23 +215,17 @@ def hash_password(password):
 
 async def ask_role(message):
     await show_screen(
-        message, "👋 Добро пожаловать в РКТМ!\\n\\nВыбери, кто ты:",
+        message, "📚 РКТМ · Расписание и замены\n\nВыбери, чьё расписание сохранить: своей группы или преподавателя.",
         reply_markup=buttons([[("🎓 Студент", "onboard:s"), ("👨‍🏫 Преподаватель", "onboard:t")]])
     )
 
 
 @router.message(CommandStart())
 async def start(message: Message):
-    uid = str(message.from_user.id)
-    p = user("telegram", uid)
-    if not p or not p["filename"]:
-        await ask_role(message)
-    else:
-        await schedule_image(message, p["source"], p["filename"], p["group_name"])
-        await message.answer("🏠 Меню Telegram доступно снизу 👇", reply_markup=keyboard(uid))
+    await show_home(message)
 
 
-@router.callback_query(F.data.startswith(("onboard:", "onboardcat:", "onboardpick:")))
+@router.callback_query(F.data.startswith(("onboard:", "onboardcat:", "onboardpick:", "onboardid:")))
 async def onboarding(call: CallbackQuery):
     await call.answer()
     uid = str(call.from_user.id)
@@ -183,17 +240,31 @@ async def onboarding(call: CallbackQuery):
         _, role, page = data.split(":")
         if role in SOURCES and page.isdigit():
             await onboarding_catalog(call.message, role, int(page))
-    elif data.startswith("onboardpick:"):
-        _, role, page, index = data.split(":")
-        if role not in SOURCES or not page.isdigit() or not index.isdigit():
+    elif data.startswith(("onboardpick:", "onboardid:")):
+        selection = data.split(":")
+        if len(selection) < 3 or selection[1] not in SOURCES:
             return
+        role = selection[1]
         if state(uid) != "onboard:" + role:
             await ask_role(call.message)
             return
         try:
-            item = await resolve_item(role, int(page), int(index))
+            if selection[0] == "onboardid":
+                if len(selection) != 3 or not selection[2].isdigit():
+                    return
+                with db() as conn:
+                    stored = conn.execute("SELECT * FROM bot_catalog_items WHERE id=? AND source=?",
+                                          (int(selection[2]), SOURCES[role])).fetchone()
+                if not stored:
+                    raise ValueError("Selection missing")
+                item = {"file":stored["filename"], "name":stored["title"]}
+            else:
+                _, _, page, index = selection
+                if not page.isdigit() or not index.isdigit():
+                    return
+                item = await resolve_item(role, int(page), int(index))
         except (IndexError, KeyError, ValueError):
-            await call.message.answer("Список изменился. Выбери заново.")
+            await call.message.answer("Список изменился. Открой его заново и выбери расписание.")
             return
         # Existing Telegram account tables remain compatible with the old profile/menu.
         with db() as c:
@@ -203,10 +274,19 @@ async def onboarding(call: CallbackQuery):
                 digest, salt = hash_password(secrets.token_urlsafe(32))
                 c.execute("INSERT INTO bot_accounts(uid,display_name,password_hash,password_salt) VALUES(?,?,?,?)",
                           (uid, item["name"], digest, salt))
-        save_user("telegram", uid, SOURCES[role], item["file"], item["name"], True)
+        save_user("telegram", uid, SOURCES[role], item["file"], item["name"], (user("telegram", uid) or {}).get("notifications", True))
         set_state(uid, None)
+        await call.message.answer("✅ Расписание сохранено. Теперь можно открыть занятия и свои замены.", reply_markup=keyboard(uid))
         await schedule_image(call.message, SOURCES[role], item["file"], item["name"], edit=True)
-        await call.message.answer("✅ Регистрация завершена! Кнопки главного меню находятся снизу 👇", reply_markup=keyboard(uid))
+
+
+def catalog_item_ids(source, items):
+    ids = []
+    with db() as conn:
+        for item in items:
+            conn.execute("INSERT INTO bot_catalog_items(source,filename,title) VALUES(?,?,?) ON CONFLICT(source,filename) DO UPDATE SET title=excluded.title", (source,item["file"],item["name"]))
+            ids.append(conn.execute("SELECT id FROM bot_catalog_items WHERE source=? AND filename=?", (source,item["file"])).fetchone()[0])
+    return ids
 
 
 async def onboarding_catalog(message, role, page=0):
@@ -218,16 +298,18 @@ async def onboarding_catalog(message, role, page=0):
         await show_screen(message, "Список пока пуст. Попробуй позже.")
         return
     page = min(max(0,page), (len(items)-1)//8)
-    rows = [[(item["name"][:48], f"onboardpick:{role}:{page}:{i}")]
-            for i,item in enumerate(items[page*8:page*8+8])]
+    visible = items[page*8:page*8+8]
+    ids = catalog_item_ids(SOURCES[role], visible)
+    rows = [[(item["name"][:48], f"onboardid:{role}:{item_id}")] for item,item_id in zip(visible,ids)]
     nav = []
     if page:
-        nav.append(("◀️", f"onboardcat:{role}:{page-1}"))
+        nav.append(("← Назад", f"onboardcat:{role}:{page-1}"))
     if (page+1)*8 < len(items):
-        nav.append(("▶️", f"onboardcat:{role}:{page+1}"))
+        nav.append(("Далее →", f"onboardcat:{role}:{page+1}"))
     if nav:
         rows.append(nav)
     rows.append([("↩️ Изменить роль", "onboard:s" if role=="t" else "onboard:t")])
+    rows.append(home_button())
     await show_screen(message,
                       ("🎓 Выбери свою группу" if role=="s" else "👨‍🏫 Выбери себя из списка преподавателей")
                       + f" · {page+1}/{(len(items)+7)//8}",
@@ -252,13 +334,14 @@ async def show_catalog(message, source_key, page=0):
             await message.answer("Список пока пуст. Попробуй позже.")
             return
         page = max(0, min(page, (len(items)-1)//8))
-        rows = [[(item["name"][:48], "view:"+source_key+":"+str(page)+":"+str(i))]
-                for i,item in enumerate(items[page*8:page*8+8])]
+        visible = items[page*8:page*8+8]
+        ids = catalog_item_ids(SOURCES[source_key], visible)
+        rows = [[(item["name"][:48], f"viewid:{item_id}")] for item,item_id in zip(visible,ids)]
         nav = []
         if page:
-            nav.append(("◀️", "cat:"+source_key+":"+str(page-1)))
+            nav.append(("← Назад", "cat:"+source_key+":"+str(page-1)))
         if (page+1)*8 < len(items):
-            nav.append(("▶️", "cat:"+source_key+":"+str(page+1)))
+            nav.append(("Далее →", "cat:"+source_key+":"+str(page+1)))
         if nav:
             rows.append(nav)
         rows.append([("↩️ Все категории", "browse")])
@@ -279,12 +362,20 @@ async def resolve_item(source_key, page, index):
     return parser.groups[page*8+index]
 
 
-def day_keyboard(item_id,selected):
-    from schedule_browser import DAY_SHORT
-    rows=[]
-    for start in (0,3):
-        rows.append([(("● " if i==selected else "")+DAY_SHORT[i],"day:"+str(item_id)+":"+str(i)) for i in range(start,start+3)])
-    rows.append([("📅 Сегодня","today:"+str(item_id))])
+def day_keyboard(item_id, selected, page=0, total=1):
+    labels = ("Пн","Вт","Ср","Чт","Пт","Сб","Вс")
+    previous,following = (selected-1)%7,(selected+1)%7
+    rows = [[(f"← {labels[previous]}",f"sheet:{item_id}:{previous}:0"),
+             ("Сегодня",f"today:{item_id}"),
+             (f"{labels[following]} →",f"sheet:{item_id}:{following}:0")]]
+    pager = []
+    if page:
+        pager.append(("← Лист",f"sheet:{item_id}:{selected}:{page-1}"))
+    if page+1 < total:
+        pager.append(("Лист →",f"sheet:{item_id}:{selected}:{page+1}"))
+    if pager:
+        rows.append(pager)
+    rows.append(home_button())
     return buttons(rows)
 
 
@@ -378,40 +469,82 @@ def schedule_text_parts(title, html, day=None):
     return chunks or ["Расписание отсутствует."]
 
 
-async def schedule_image(message, source, filename, title, day=None, item_id=None, edit=False):
+async def show_photo_pages(message, pages, markup, title, edit=False, page=0):
+    """One visible photo. Leaf navigation replaces its media instead of appending."""
+    page = min(max(0,page),len(pages)-1)
+    caption = f"📅 {title.rstrip(' ,')}"[:850]
+    if len(pages)>1:
+        caption += f" · Лист {page+1}/{len(pages)}"
+    photo = BufferedInputFile(pages[page],filename="schedule.png")
+    if edit:
+        try:
+            last = await message.edit_media(media=InputMediaPhoto(media=photo,caption=caption),reply_markup=markup)
+        except Exception as error:
+            if "message is not modified" in str(error).lower():
+                last = message
+            else:
+                last = None
+    else:
+        last = None
+    if last is None:
+        with db() as conn:
+            old = conn.execute("SELECT message_id FROM bot_screen_messages WHERE chat_id=?",(str(message.chat.id),)).fetchone()
+        last = await message.answer_photo(photo,caption=caption,reply_markup=markup)
+        if old:
+            try:
+                await message.bot.delete_message(message.chat.id,old["message_id"])
+            except Exception:
+                log.debug("Cannot remove old schedule screen",exc_info=True)
+    with db() as conn:
+        conn.execute("INSERT INTO bot_screen_messages VALUES(?,?) ON CONFLICT(chat_id) DO UPDATE SET message_id=excluded.message_id",
+                     (str(message.chat.id),last.message_id))
+
+
+async def schedule_image(message, source, filename, title, day=None, item_id=None, edit=False, page=0):
     from app import fetch_html, SCHEDULE_BASE
+    from schedule_images import daily_images, plain
+    from substitutions import personal_message, message_parts
+    from datetime import timedelta
     if source not in SOURCES.values() or not re.fullmatch(r"[^/\\?#]+\.html?", filename, re.I):
-        await message.answer("Некорректное расписание.")
+        await message.answer("Не удалось открыть расписание. Выбери его заново в каталоге.", reply_markup=catalog_keyboard())
         return
     try:
         if item_id is None:
-            with db() as c:
-                c.execute("INSERT INTO bot_catalog_items(source,filename,title) VALUES (?,?,?) ON CONFLICT(source,filename) DO UPDATE SET title=excluded.title",(source,filename,title))
-                item=c.execute("SELECT id FROM bot_catalog_items WHERE source=? AND filename=?",(source,filename)).fetchone()
-                item_id=item["id"]
-        if day is None:
-            day = today_schedule_day()
+            with db() as conn:
+                conn.execute("INSERT INTO bot_catalog_items(source,filename,title) VALUES(?,?,?) ON CONFLICT(source,filename) DO UPDATE SET title=excluded.title", (source,filename,title))
+                item_id = conn.execute("SELECT id FROM bot_catalog_items WHERE source=? AND filename=?", (source,filename)).fetchone()[0]
+        day = today_schedule_day() if day is None else day
+        if day not in range(7):
+            raise ValueError("Invalid weekday")
         if day == 6:
-            parts = ["📅 <b>" + escape(title) + " · Воскресенье</b>\n☀️ Сегодня выходной, уроков нет."]
+            parts = ["📅 " + escape(title) + " · Воскресенье\nВоскресенье — выходной, уроков нет."]
         else:
             html = await fetch_html(urljoin(SCHEDULE_BASE, filename))
             parts = schedule_text_parts(title, html, day)
-        from substitutions import substitutions_for, format_group_changes
-        from datetime import timedelta
-        local_today = datetime.now(ZoneInfo(SCHEDULE_TIMEZONE)).date()
-        target_date = (local_today + timedelta(days=(day - local_today.weekday()) % 7)).isoformat()
-        changes = substitutions_for(title, target_date) if source == "raspisan" else []
+        today = datetime.now(ZoneInfo(SCHEDULE_TIMEZONE)).date()
+        target = (today + timedelta(days=(day-today.weekday()) % 7)).isoformat()
+        changes = personal_message({"source":source,"group_name":title}, target)
+        markup = day_keyboard(item_id, day)
+        try:
+            pages = await daily_images(title, parts, changes)
+            page = min(max(0,page),len(pages)-1)
+            markup = day_keyboard(item_id,day,page,len(pages))
+            await show_photo_pages(message,pages,markup,title,edit=edit,page=page)
+            return
+        except Exception:
+            log.exception("Schedule photo unavailable; falling back to complete text")
+        content = "\n\n".join(plain(part) for part in parts)
         if changes:
-            parts.append("<b>🔄 Замены</b>\n" + escape(format_group_changes(changes, title, target_date)))
-        content = "\n\n".join(parts)
-        if len(content) > 4000:
-            content = parts[0] if len(parts[0]) <= 4000 else parts[0][:3500] + "…"
-            content += "\n\n⚠️ Расписание слишком длинное для одного сообщения."
-        markup = day_keyboard(item_id, day if day < 6 else -1)
-        await show_screen(message, content, edit=edit, parse_mode="HTML", reply_markup=markup)
+            content += "\n\n" + changes
+        chunks = list(message_parts("📋 Текстовая версия расписания\n\n" + content))
+        for index, chunk in enumerate(chunks):
+            if index == 0:
+                await show_screen(message, chunk, edit=edit, reply_markup=markup if len(chunks)==1 else None)
+            else:
+                await message.answer(chunk, reply_markup=markup if index==len(chunks)-1 else None)
     except Exception:
-        log.exception("Schedule text failed")
-        await message.answer("Не удалось загрузить расписание. Попробуй позже.")
+        log.exception("Cannot load daily schedule")
+        await message.answer("Сейчас не удалось загрузить расписание. Попробуй немного позже.", reply_markup=buttons([home_button()]))
 
 
 async def show_item(message, uid, source, filename, title):
@@ -424,22 +557,31 @@ async def show_item(message, uid, source, filename, title):
     item_id=str(item["id"])
     favorite_button=("❌ Убрать из избранного","unfav:"+str(fav["id"])) if fav else ("⭐ В избранное","addid:"+item_id)
     await show_screen(message,"📖 "+title+"\nВыбери действие:", reply_markup=buttons([
-        [("📋 Посмотреть расписание","imgid:"+item_id)],
+        [("📅 Открыть расписание","imgid:"+item_id)],
         [favorite_button],
-        [("📌 Сделать моим","mineid:"+item_id)],
+        [("📌 Сделать моим","mineid:"+item_id)], home_button(),
     ]))
 
 
-async def show_favorites(message, uid):
-    with db() as c:
-        rows = c.execute("SELECT id,title FROM bot_favorites WHERE uid=? ORDER BY id DESC LIMIT 60", (uid,)).fetchall()
-    if not rows:
-        await show_screen(message,"⭐ Избранное пусто. Открой любое расписание и нажми «В избранное».")
-        return
-    await show_screen(message,"⭐ Избранное", reply_markup=buttons([[(r["title"][:48], "favorite:"+str(r["id"]))] for r in rows]))
+async def show_favorites(message, uid, page=0):
+    with db() as conn:
+        items = conn.execute("SELECT id,title FROM bot_favorites WHERE uid=? ORDER BY id DESC", (uid,)).fetchall()
+    pages = max(1, (len(items)+9)//10)
+    page = min(max(0,page), pages-1)
+    rows = [[(item["title"][:48], f"favorite:{item['id']}")] for item in items[page*10:page*10+10]]
+    nav = []
+    if page:
+        nav.append(("← Назад", f"ui:favorites:{page-1}"))
+    if page+1 < pages:
+        nav.append(("Далее →", f"ui:favorites:{page+1}"))
+    if nav:
+        rows.append(nav)
+    rows += [[("🔎 Все расписания", "browse")], home_button()]
+    text = f"Выбери расписание для просмотра.\nСтраница {page+1} из {pages}" if items else "Здесь пока пусто. Открой расписание в каталоге и нажми «В избранное»."
+    await show_screen(message, "⭐ Избранное\n\n"+text, reply_markup=buttons(rows))
 
 
-@router.callback_query(F.data.startswith(("reg:", "cat:", "view:", "browse", "addid:", "unfav:", "favorite:", "imgid:", "mineid:", "day:", "all:", "today:")))
+@router.callback_query(F.data.startswith(("reg:", "cat:", "view:", "viewid:", "browse", "addid:", "unfav:", "favorite:", "imgid:", "mineid:", "day:", "all:", "today:", "sheet:")))
 async def callback(call: CallbackQuery):
     await call.answer()
     uid = str(call.from_user.id)
@@ -453,7 +595,7 @@ async def callback(call: CallbackQuery):
         set_state(uid, "reg_name")
         await call.message.answer("✍️ Напиши своё имя (от 2 до 60 символов).")
         return
-    if not account(uid):
+    if not account(uid) and not user("telegram", uid):
         await call.message.answer("Сначала зарегистрируйся: /start")
         return
     if data == "browse":
@@ -462,6 +604,16 @@ async def callback(call: CallbackQuery):
         parts=data.split(":")
         if len(parts)==3 and parts[2].isdigit():
             await show_catalog(call.message,parts[1],int(parts[2]))
+    elif data.startswith("viewid:"):
+        value = data.partition(":")[2]
+        if not value.isdigit():
+            return
+        with db() as conn:
+            item = conn.execute("SELECT * FROM bot_catalog_items WHERE id=?", (int(value),)).fetchone()
+        if item:
+            await show_item(call.message,uid,item["source"],item["filename"],item["title"])
+        else:
+            await show_screen(call.message, "Этот выбор устарел. Открой каталог ещё раз.", reply_markup=catalog_keyboard())
     elif data.startswith("view:"):
         parts=data.split(":")
         if len(parts)==4 and parts[2].isdigit() and parts[3].isdigit():
@@ -486,10 +638,22 @@ async def callback(call: CallbackQuery):
                           (uid,source,filename,title))
             await call.message.answer("⭐ Добавлено: "+title)
         elif action=="mineid":
-            save_user("telegram",uid,source,filename,title,True)
-            await show_screen(call.message,"📌 Личное расписание: "+title,reply_markup=keyboard(uid))
+            save_user("telegram",uid,source,filename,title,(user("telegram",uid) or {}).get("notifications", True))
+            with db() as conn:
+                conn.execute("INSERT INTO bot_roles VALUES(?,?) ON CONFLICT(uid) DO UPDATE SET role=excluded.role",
+                             (uid, "teacher" if source == "Praspisan" else "student"))
+            await show_screen(call.message,"✅ Основное расписание сохранено\n\n"+title,reply_markup=keyboard(uid))
         else:
             await schedule_image(call.message,source,filename,title,edit=True)
+    elif data.startswith("sheet:"):
+        parts = data.split(":")
+        if len(parts)!=4 or not all(p.isdigit() for p in parts[1:]) or int(parts[2]) not in range(7):
+            return
+        with db() as conn:
+            item = conn.execute("SELECT * FROM bot_catalog_items WHERE id=?",(int(parts[1]),)).fetchone()
+        if item:
+            await schedule_image(call.message,item["source"],item["filename"],item["title"],
+                                 day=int(parts[2]),item_id=item["id"],edit=True,page=int(parts[3]))
     elif data.startswith(("day:", "all:", "today:")):
         parts=data.split(":")
         if len(parts)<2 or not parts[1].isdigit():
@@ -534,22 +698,23 @@ async def complete_registration(message,uid):
 
 
 @router.message(Command("profile"))
-async def profile(message: Message):
-    uid=str(message.from_user.id)
-    a=account(uid)
-    p=user("telegram",uid)
-    if not a:
+async def profile(message: Message, uid=None, edit=False):
+    uid = str(uid if uid is not None else message.from_user.id)
+    p = user("telegram", uid)
+    if not p:
         await ask_role(message)
         return
-    await show_screen(message,"👤 "+a["display_name"]+"\nРоль: "+("Преподаватель" if get_role(uid)=="teacher" else "Студент")+
-                         "\n📌 Личное: "+(p["group_name"] if p and p["filename"] else "не выбрано")+
-                         "\n⭐ Избранное: /favorites\n🔄 Перерегистрироваться: /register",reply_markup=keyboard(uid))
+    role = "Преподаватель" if p["source"] == "Praspisan" else "Студент"
+    status = "включены 🔔" if p["notifications"] else "выключены 🔕"
+    await show_screen(message, f"👤 Мой профиль\n\nРоль: {role}\n{profile_line(p)}\nУведомления: {status}",
+        edit=edit, reply_markup=buttons([[("🔎 Изменить основное расписание", "ui:register")],
+            [("🔔 Настроить уведомления", "ui:settings")], [("⭐ Избранное", "ui:favorites")], home_button()]))
 
 
 @router.message(Command("favorites"))
 async def favorites(message: Message):
     uid=str(message.from_user.id)
-    if not account(uid):
+    if not account(uid) and not user("telegram", uid):
         await ask_role(message)
     else:
         await show_favorites(message,uid)
@@ -558,7 +723,7 @@ async def favorites(message: Message):
 @router.message(Command("schedule"))
 async def personal(message: Message):
     uid=str(message.from_user.id)
-    if not account(uid):
+    if not account(uid) and not user("telegram", uid):
         await ask_role(message)
         return
     p=user("telegram",uid)
@@ -569,55 +734,62 @@ async def personal(message: Message):
 
 
 def substitution_menu():
-    return buttons([[("👤 Мои замены", "subs:mine")],
-                    [("📆 Замены на день", "subs:dates")],
-                    [("🏠 Главное меню", "subs:home")]])
+    return substitution_dates()
 
 
-def substitution_dates():
-    from datetime import timedelta
-    today = datetime.now(ZoneInfo(SCHEDULE_TIMEZONE)).date()
-    rows = [[((today + timedelta(days=i)).strftime("%d.%m (%a)"), f"subs:day:{i}")]
-            for i in range(8)]
-    rows.append([("⬅️ Назад", "subs:menu")])
+def substitution_dates(page=0):
+    from substitutions import relevant_days,display_date
+    dates = relevant_days()
+    rows = [[(f"{label} · {display_date(day)}",f"subs:day:{day}")]
+            for label,day in zip(("Сегодня","Завтра"),dates)]
+    rows += [[("👤 Мои замены","subs:mine")],home_button()]
     return buttons(rows)
+
+
+async def substitution_callback_content(message, uid, action, edit=False, page=0):
+    from substitutions import personal_overview, message_parts
+    if action == "dates":
+        text = "📆 Замены на день\n\nВыбери сегодня или завтра. Если замены ещё не опубликованы, бот сообщит об этом."
+        await show_screen(message, text, edit=edit, reply_markup=substitution_dates(page))
+    else:
+        p = user("telegram", uid)
+        content = "🔄 Мои замены\n\n" + profile_line(p) + "\n\n" + personal_overview(p) if p else "Выбери группу или преподавателя через /start, чтобы увидеть свои замены."
+        chunks = list(message_parts(content))
+        for index, chunk in enumerate(chunks):
+            markup = substitution_menu() if index == len(chunks)-1 else None
+            if index == 0:
+                await show_screen(message, chunk, edit=edit, reply_markup=markup)
+            else:
+                await message.answer(chunk, reply_markup=markup)
 
 
 @router.callback_query(F.data.startswith("subs:"))
 async def substitution_callback(call: CallbackQuery):
-    from datetime import timedelta
-    from substitutions import substitutions_for, format_group_changes, substitutions_on, format_day_changes
+    from substitutions import substitutions_on, format_day_changes, relevant_days, message_parts
     await call.answer()
-    action = call.data
     uid = str(call.from_user.id)
+    action = call.data
     if action == "subs:home":
-        await show_screen(call.message, "🏠 Главное меню", edit=True)
-        await call.message.answer("Выбери раздел 👇", reply_markup=keyboard(uid))
+        await show_home(call.message, uid)
     elif action == "subs:menu":
-        await show_screen(call.message, "🔄 Замены — выбери раздел:", edit=True, reply_markup=substitution_menu())
-    elif action == "subs:dates":
-        await show_screen(call.message, "📆 Выбери день:", edit=True, reply_markup=substitution_dates())
+        await show_screen(call.message, "🔄 Замены\n\n«Мои замены» — изменения для тебя.\n«Сегодня» и «Завтра» — замены всех групп за выбранный день.", edit=True, reply_markup=substitution_menu())
     elif action == "subs:mine":
-        p = user("telegram", uid)
-        if not p or not p["filename"] or p["source"] != "raspisan":
-            content = "Сначала выбери свою группу через /start."
-        else:
-            today = datetime.now(ZoneInfo(SCHEDULE_TIMEZONE)).date()
-            messages = []
-            for delta in range(8):
-                date = (today + timedelta(days=delta)).isoformat()
-                changes = substitutions_for(p["group_name"], date)
-                if changes:
-                    messages.append(format_group_changes(changes, p["group_name"], date))
-            content = "\n\n".join(messages) if messages else "Для твоей группы пока нет опубликованных замен на ближайшие дни."
-        await show_screen(call.message, content[:3900], edit=True, reply_markup=substitution_menu())
+        await substitution_callback_content(call.message, uid, "mine", edit=True)
+    elif action == "subs:dates" or action.startswith("subs:dates:"):
+        value = action.removeprefix("subs:dates:")
+        await substitution_callback_content(call.message, uid, "dates", edit=True, page=int(value) if value.isdigit() else 0)
     elif action.startswith("subs:day:"):
-        offset = int(action.rsplit(":", 1)[1])
-        if offset not in range(8):
+        day = action.removeprefix("subs:day:")
+        if day not in relevant_days():
+            await substitution_callback_content(call.message, uid, "dates", edit=True)
             return
-        day = (datetime.now(ZoneInfo(SCHEDULE_TIMEZONE)).date() + timedelta(days=offset)).isoformat()
-        content = format_day_changes(substitutions_on(day), day)
-        await show_screen(call.message, content[:3900], edit=True, reply_markup=substitution_dates())
+        chunks = list(message_parts(format_day_changes(substitutions_on(day), day)))
+        for index, chunk in enumerate(chunks):
+            markup = substitution_dates() if index == len(chunks)-1 else None
+            if index == 0:
+                await show_screen(call.message, chunk, edit=True, reply_markup=markup)
+            else:
+                await call.message.answer(chunk, reply_markup=markup)
 
 
 @router.message(Command("substitutions"))
@@ -659,6 +831,56 @@ async def admin_teachers(message: Message):
         else:
             c.execute("DELETE FROM approved_teachers WHERE uid=?",(target,))
     await message.answer("Готово.")
+
+
+@router.callback_query(F.data.startswith("ui:"))
+async def interface_callback(call: CallbackQuery):
+    await call.answer()
+    uid = str(call.from_user.id)
+    if call.data == "ui:home":
+        await show_home(call.message, uid)
+    elif call.data == "ui:more":
+        await show_more(call.message,uid,edit=True)
+    elif call.data == "ui:help":
+        await show_help(call.message,edit=True)
+    elif call.data == "ui:news":
+        await show_news(call.message,edit=True)
+    elif call.data == "ui:admin":
+        if uid in ADMIN_IDS:
+            await show_screen(call.message,"🔐 Админ-панель\n/addteacher ID\n/removeteacher ID\n/teachers",edit=True,reply_markup=buttons([home_button()]))
+    elif call.data == "ui:profile":
+        await profile(call.message, uid, edit=True)
+    elif call.data == "ui:settings":
+        await show_settings(call.message, uid, edit=True)
+    elif call.data == "ui:register":
+        await ask_role(call.message)
+    elif call.data == "ui:favorites" or call.data.startswith("ui:favorites:"):
+        value = call.data.removeprefix("ui:favorites:")
+        await show_favorites(call.message, uid, int(value) if value.isdigit() else 0)
+    elif call.data in ("ui:notify:on", "ui:notify:off"):
+        with db() as conn:
+            conn.execute("UPDATE users SET notifications=? WHERE platform='telegram' AND user_id=?",
+                         (int(call.data == "ui:notify:on"), uid))
+        await show_settings(call.message, uid, edit=True)
+
+
+@router.message(Command("help"))
+async def help_command(message: Message):
+    await show_help(message)
+
+
+@router.message(Command("notify", "mute"))
+async def notification_setting(message: Message):
+    uid = str(message.from_user.id)
+    p = user("telegram", uid)
+    if not p:
+        await message.answer("Сначала зарегистрируйся через /start.")
+        return
+    enabled = message.text.split()[0].split("@")[0] == "/notify"
+    with db() as conn:
+        conn.execute("UPDATE users SET notifications=? WHERE platform='telegram' AND user_id=?",
+                     (int(enabled), uid))
+    await show_settings(message, uid)
 
 
 @router.message(F.text)
@@ -706,7 +928,7 @@ async def text_handler(message: Message):
         else:
             await message.answer("Неверный код. Попробуй ещё раз или /register.")
         return
-    if text in ("📅 Моё расписание", "📅 Расписание", "🔎 Все расписания", "📚 Выбрать расписание", "⭐ Избранное", "👤 Профиль", "🔐 Админ-панель", "🔔 Уведомления", "📰 Новости", "🔄 Замены"):
+    if text in ("📅 Моё расписание", "📅 Расписание", "🔎 Все расписания", "📚 Выбрать расписание", "⭐ Избранное", "👤 Профиль", "🔐 Админ-панель", "🔔 Уведомления", "📰 Новости", "🔄 Замены", "🔄 Мои замены", "📆 Замены по дате", "❔ Помощь", "☰ Ещё"):
         try:
             await message.delete()
         except Exception:
@@ -714,7 +936,7 @@ async def text_handler(message: Message):
     if text in ("📅 Моё расписание","📅 Расписание"):
         await personal(message)
     elif text in ("🔎 Все расписания","📚 Выбрать расписание"):
-        if not account(uid):
+        if not account(uid) and not user("telegram", uid):
             await ask_role(message)
         else:
             await show_screen(message,"🔎 Выбери категорию:",reply_markup=catalog_keyboard())
@@ -727,10 +949,16 @@ async def text_handler(message: Message):
     elif text=="🔄 Замены":
         await personal_substitutions(message)
     elif text=="🔔 Уведомления":
-        await show_screen(message,"🔔 /notify — включить, /mute — выключить.")
+        await show_settings(message, uid)
+    elif text=="❔ Помощь":
+        await show_help(message)
+    elif text=="🔄 Мои замены":
+        await substitution_callback_content(message, uid, "mine")
+    elif text=="📆 Замены по дате":
+        await substitution_callback_content(message, uid, "dates")
     elif text=="📰 Новости":
-        from features import news_list
-        items=news_list()[:3]
-        await show_screen(message,"\n\n".join(x["title"]+"\n"+x["body"][:350] for x in items) if items else "Новостей пока нет.")
+        await show_news(message)
+    elif text=="☰ Ещё":
+        await show_more(message,uid)
     else:
         await message.answer("Выбери действие из меню.",reply_markup=keyboard(uid) if account(uid) else None)

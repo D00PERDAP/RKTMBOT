@@ -1,0 +1,7 @@
+.env
+.venv*/
+.deps/
+worktmp/
+data/
+__pycache__/
+*.pyc
