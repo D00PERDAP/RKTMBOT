@@ -12,3 +12,5 @@ HTML schedule snapshots downloaded on 2026-11-01:
 - schedule-group.html: https://rktm.info/wp-content/uploads/HTML/1.html — СВ-02, Monday 2 November, lessons 1–8.
 - schedule-teacher.html: https://rktm.info/wp-content/uploads/HTML/m1.html — Агеев С.О., no lessons listed on Monday 2 November.
 The accompanying JSON files preserve official catalog titles and filenames. These are parser/rendering fixtures, not invented timetables.
+
+- schedule-with-changes.html: https://rktm.info/wp-content/uploads/HTML/15.html — СВ-04, downloaded on 2026-11-01. Combined with four rows from the 02.11.26 PDF to verify that the actual timetable and substitutions fit one compact sheet.

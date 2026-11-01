@@ -56,9 +56,9 @@ The adapter supports inline menus, personal substitutions for students and teach
 
 ## Chat interface
 
-The main menu shows the saved group/teacher and notification status. Daily schedule and personal substitutions are the primary actions. Settings offer one action matching the current notification state. Profile changes require selecting a specific catalog item; catalog buttons contain the source and filename, so old pages cannot silently select a different item.
+The main menu shows the saved group/teacher and notification status, with four primary buttons. Secondary actions are in More. Daily schedule and personal substitutions are the primary actions. Settings offer one action matching the current notification state. Profile changes require selecting a specific catalog item; catalog buttons contain the source and filename, so old pages cannot silently select a different item.
 
-Catalogs, published dates and favorites are paginated. Favorites open in preview mode, with day switching that does not modify the saved profile or notification preference. Menus use plain text and native inline keyboards; no additional permissions, Mini App or database migration is required for this interface update. Existing numeric catalog commands remain supported.
+Catalogs and favorites are paginated; substitutions offer only today and tomorrow in the college timezone. Favorites open in preview mode, with day switching that does not modify the saved profile or notification preference. Menus use plain text and native inline keyboards; no additional permissions, Mini App or database migration is required for this interface update. Existing numeric catalog commands remain supported.
 
 Manual acceptance in MAX: /start, registration as student and teacher, catalog next/back, opening an older catalog button, /today and day buttons, personal substitutions, published dates, favorites with day switching, notification toggle, and return to the main menu. Transport/navigation regressions are covered in tests/test_max_navigation.py; an actual MAX client still needs a visual check after deployment.
 
@@ -66,3 +66,6 @@ Manual acceptance in MAX: /start, registration as student and teacher, catalog n
 ## Daily schedule photos
 
 Daily schedules now default to shared Pillow PNG cards (schedule_images.py). Install fonts-dejavu-core on Ubuntu. No Chromium process is needed for this path. MAX uses the documented image upload/token workflow and retries attachment.not.ready with bounded backoff. If rendering or photo delivery fails, complete timetable text and day buttons remain available. Test both native clients after deployment; unit transports do not replace a live UI check.
+
+
+Compact cards prefer a single readable sheet. Overflow is a one-message carousel: only the selected image is uploaded, and leaf/day arrows replace its media. Favorites retain their owner/source/filename context. Archived substitution dates are hidden without deleting documents; today/tomorrow display an explicit unpublished state when necessary.

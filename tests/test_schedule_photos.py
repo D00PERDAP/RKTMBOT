@@ -45,6 +45,41 @@ class CardTests(unittest.TestCase):
         self.assertIn('Кабинет: 999',content)
         self.assertNotIn('\u200d',content)
         self.assertIn('changes',[kind for page in pages for kind,_ in page])
+    def test_real_day_and_four_substitutions_fit_one_readable_sheet(self):
+        import substitutions as subs
+        html=(FIXTURES/'schedule-with-changes.html').read_text(encoding='utf-8')
+        rows=json.loads((FIXTURES/'replacements-2026-11-02.json').read_text(encoding='utf-8'))
+        rows=[r for r in rows if r['group']=='СВ-04']
+        self.assertEqual(len(rows),4)
+        parts=tg.schedule_text_parts('СВ-04',html,0)
+        changes=subs.format_day_changes(rows,'2026-11-02')
+        images=render_daily_pages('СВ-04',tuple(parts),changes)
+        self.assertEqual(len(images),1)
+        with Image.open(io.BytesIO(images[0])) as image:
+            self.assertLessEqual(image.height,2000)
+        _,pages=layout_cards(parts,changes,'СВ-04')
+        content='\n'.join(line for page in pages for _,lines in page for line in lines)
+        for number in range(3,7):
+            self.assertIn(f'{number}-й урок',content)
+        self.assertIn('8-й урок',content)
+        self.assertEqual(content.count('Стало:'),4)
+        self.assertEqual(content.count('Кабинет: 35'),2)
+        self.assertEqual(content.count('Кабинет: УМПроб'),2)
+
+    def test_ambiguous_subgroups_and_different_original_are_not_overwritten(self):
+        parts=('📅 СВ-02 · Понедельник\n\n1-й урок · 08:30\nМатематика Иванов А.В. 25',)
+        changes='Замены на 02.11.2026\n\nСВ-02 · Урок 1\nБыло: Математика\nСтало: Физика\nКабинет: 26\n\nСВ-02 · Урок 1\nБыло: Математика\nСтало: Химия\nКабинет: 27'
+        _,pages=layout_cards(parts,changes,'СВ-02')
+        text='\n'.join(line for page in pages for _,lines in page for line in lines)
+        self.assertIn('Математика Иванов А.В. 25',text)
+        self.assertIn('Стало: Физика',text)
+        self.assertIn('Стало: Химия',text)
+        different='СВ-02 · Урок 1\nБыло: История\nСтало: География'
+        _,pages=layout_cards(parts,different,'СВ-02')
+        text='\n'.join(line for page in pages for _,lines in page for line in lines)
+        self.assertIn('Математика Иванов А.В. 25',text)
+        self.assertIn('Было: История',text)
+
     def test_empty_timetable_still_produces_readable_png(self):
         pages=render_daily_pages('СВ-02',tuple())
         self.assertEqual(len(pages),1)
@@ -79,15 +114,18 @@ class PhotoDeliveryTests(unittest.IsolatedAsyncioTestCase):
         message.answer_photo.return_value=SimpleNamespace(message_id=101)
         message.edit_media.return_value=SimpleNamespace(message_id=90)
         return message
-    async def test_telegram_sends_png_with_last_page_navigation(self):
+    async def test_telegram_carousel_replaces_one_photo_without_sending_all_leaves(self):
         message=self.message()
-        with patch('app.fetch_html',AsyncMock(return_value=HTML)), patch('schedule_images.daily_images',AsyncMock(return_value=(b'first',b'last'))), patch('substitutions.personal_message',return_value=''), patch.object(tg,'today_schedule_day',return_value=0):
+        with patch('app.fetch_html',AsyncMock(return_value=HTML)),patch('schedule_images.daily_images',AsyncMock(return_value=(b'first',b'last'))),patch('substitutions.personal_message',return_value=''),patch.object(tg,'today_schedule_day',return_value=0):
             await tg.schedule_image(message,'raspisan','1.html',TITLE)
-        self.assertEqual(message.answer_photo.await_count,2)
-        first,last=message.answer_photo.await_args_list
-        self.assertEqual(first.args[0].data,b'first')
-        self.assertNotIn('reply_markup', first.kwargs)
-        self.assertTrue(last.kwargs['reply_markup'])
+            self.assertEqual(message.answer_photo.await_count,1)
+            self.assertEqual(message.answer_photo.call_args.args[0].data,b'first')
+            markup=message.answer_photo.call_args.kwargs['reply_markup']
+            self.assertTrue(any(b.callback_data.endswith(':0:1') for row in markup.inline_keyboard for b in row))
+            await tg.schedule_image(message,'raspisan','1.html',TITLE,day=0,edit=True,page=1)
+        self.assertEqual(message.answer_photo.await_count,1)
+        self.assertEqual(message.edit_media.call_args.kwargs['media'].media.data,b'last')
+        self.assertIn('2/2',message.edit_media.call_args.kwargs['media'].caption)
         message.answer.assert_not_awaited()
     async def test_telegram_photo_failure_falls_back_to_all_text(self):
         message=self.message()

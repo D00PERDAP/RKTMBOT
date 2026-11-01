@@ -188,7 +188,7 @@ class StoreTests(unittest.IsolatedAsyncioTestCase):
         init_max(); await self.refresh()
         with features.db() as c:
             c.execute("INSERT INTO max_profiles VALUES('7','Praspisan','m1.html','Ким И.А.','teacher')")
-        with patch('max_bot.send', AsyncMock()) as send:
+        with patch('max_bot.send', AsyncMock()) as send, patch.object(s,'relevant_days',return_value=[self.day,'2026-11-03']):
             await handle(AsyncMock(), '7', '/subsdates')
             self.assertIn(self.day, str(send.call_args))
             await handle(AsyncMock(), '7', '/subsmine')

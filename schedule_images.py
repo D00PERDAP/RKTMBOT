@@ -11,9 +11,7 @@ from bs4 import BeautifulSoup
 from PIL import Image, ImageDraw, ImageFont
 
 WIDTH = 1080
-MAX_HEIGHT = 1600
-BODY_WIDTH = 900
-LINE_HEIGHT = 44
+MAX_HEIGHT = 2000
 _RENDER_LIMIT = asyncio.Semaphore(2)
 
 
@@ -92,7 +90,7 @@ def content_blocks(parts, changes=''):
 
 def header_layout(title, heading, draw):
     title = image_text(title).strip(' ,')
-    title_lines = wrap(draw, title, face(44, True), 940)
+    title_lines = wrap(draw, title, face(40, True), 960)
     # The full name remains in the original heading if unusually long.
     if len(title_lines) > 3:
         title_lines = ['Расписание на день']
@@ -101,78 +99,144 @@ def header_layout(title, heading, draw):
         if first.startswith(title):
             first = first[len(title):].strip(' ,·')
         heading = '\n'.join([first] + rest)
-    metadata = wrap(draw, heading, face(26), 940) if heading else []
-    height = 145 + len(title_lines)*58 + len(metadata)*36
+    metadata = wrap(draw, heading, face(24), 960) if heading else []
+    height = 110 + len(title_lines)*50 + len(metadata)*29
     return title_lines, metadata, height
 
 
-def layout_cards(parts, changes='', title=''):
-    """Return every wrapped line, paginated by measured height; never truncate."""
+def combine_changes(title, heading, blocks):
+    """Merge only one unambiguous group/lesson change, retaining source content."""
+    normalize = lambda value: re.sub(r"\s+", "", value).casefold()
+    candidates = {}
+    base_counts = {}
+    for index,(kind,text) in enumerate(blocks):
+        if kind=="schedule":
+            number = re.match(r"(\d+)-й урок",text)
+            if number:
+                n = int(number[1])
+                base_counts[n] = base_counts.get(n,0)+1
+        else:
+            header,*lines = text.splitlines()
+            match = re.fullmatch(r"(.+?)\s*·\s*Урок\s+(\d+)",header)
+            if match and normalize(match[1])==normalize(title.rstrip(' ,')):
+                fields = {key.strip():value.strip() for line in lines if ': ' in line for key,value in [line.split(': ',1)]}
+                if len(fields)==len(lines) and set(fields).issubset({'Было','Стало','Преподаватель','Кабинет'}) and fields.get('Было') and fields.get('Стало'):
+                    candidates.setdefault(int(match[2]),[]).append((index,fields))
+    used = set()
+    result = []
+    for kind,text in blocks:
+        lines = text.splitlines()
+        number = re.match(r"(\d+)-й урок",lines[0]) if kind=='schedule' else None
+        options = candidates.get(int(number[1]),[]) if number else []
+        source = '\n'.join(lines[1:])
+        if number and base_counts[int(number[1])]==1 and len(options)==1 and normalize(source).startswith(normalize(options[0][1]['Было'])):
+            index,fields = options[0]
+            merged = [lines[0],'Было: '+source,'Стало: '+fields['Стало']]
+            teacher = fields.get('Преподаватель')
+            if teacher and normalize(teacher) not in normalize(fields['Стало']):
+                merged.append('Преподаватель: '+teacher)
+            if fields.get('Кабинет'):
+                merged.append('Кабинет: '+fields['Кабинет'])
+            result.append(('changes','\n'.join(merged)))
+            used.add(index)
+        else:
+            result.append((kind,text))
+    if not used:
+        return heading,blocks
+    final = []
+    for index,(kind,text) in enumerate(result):
+        if index in used:
+            continue
+        if kind=='changes' and text.startswith('Замены на '):
+            heading += '\n'+text
+        else:
+            final.append((kind,text))
+    return heading,final
+
+
+def _arrange(parts, changes='', title=''):
     draw = ImageDraw.Draw(Image.new('RGB', (WIDTH, 1)))
     heading, blocks = content_blocks(parts, changes)
-    cards = []
-    for kind, text in blocks:
-        lines = wrap(draw, text, face(32), BODY_WIDTH)
-        for offset in range(0, len(lines), 20):
-            segment = lines[offset:offset+20]
-            if offset:
-                segment = ['Продолжение'] + segment
-            cards.append((kind, segment))
+    heading, blocks = combine_changes(title,heading,blocks)
     _, _, header = header_layout(title, heading, draw)
-    available = MAX_HEIGHT - header - 100
-    if available < 1000:
+    available = MAX_HEIGHT - header - 70
+    if available < 600:
         raise ValueError('Schedule title is too long for a photo; use text')
-    pages, page, used = [], [], 0
-    for card in cards:
-        height = 48 + LINE_HEIGHT * len(card[1])
-        if page and used + height + 16 > available:
+    alternatives = []
+    # Prefer one readable sheet, with a firm minimum type size. Larger days
+    # keep the comfortable type size and are shown in a one-message carousel.
+    for size, line_height, padding, gap in ((30,38,24,8),(28,35,20,6),(26,33,16,6)):
+        cards = []
+        maximum = min(36, (available-padding-gap)//line_height-1)
+        for kind,text in blocks:
+            lines = wrap(draw,text,face(size),916)
+            for offset in range(0,len(lines),maximum):
+                segment = lines[offset:offset+maximum]
+                if offset:
+                    segment = ['Продолжение'] + segment
+                cards.append((kind,segment))
+        pages,page,used = [],[],0
+        for card in cards:
+            height = padding + line_height*len(card[1]) + gap
+            if page and used+height > available:
+                pages.append(page)
+                page,used = [],0
+            page.append(card)
+            used += height
+        if page:
             pages.append(page)
-            page, used = [], 0
-        page.append(card)
-        used += height + 16
-    if page:
-        pages.append(page)
-    return heading, pages
+        result = heading,pages,(size,line_height,padding,gap)
+        if len(pages)==1:
+            return result
+        alternatives.append(result)
+    return alternatives[0]
+
+
+def layout_cards(parts, changes='', title=''):
+    heading,pages,_ = _arrange(parts,changes,title)
+    return heading,pages
 
 
 @lru_cache(maxsize=12)
 def render_daily_pages(title, parts, changes=''):
-    heading, pages = layout_cards(parts, changes, title)
-    measure = ImageDraw.Draw(Image.new('RGB', (WIDTH, 1)))
-    title_lines, metadata, header = header_layout(title, heading, measure)
+    heading,pages,style = _arrange(parts,changes,title)
+    size,line_height,padding,gap = style
+    measure = ImageDraw.Draw(Image.new('RGB',(WIDTH,1)))
+    title_lines,metadata,header = header_layout(title,heading,measure)
     results = []
-    for number, cards in enumerate(pages, 1):
-        height = header + sum(48 + LINE_HEIGHT * len(lines) + 16 for _, lines in cards) + 100
+    for number,cards in enumerate(pages,1):
+        height = header + sum(padding+line_height*len(lines)+gap for _,lines in cards)+70
         if height > MAX_HEIGHT:
             raise ValueError('Schedule page exceeds photo dimensions')
-        image = Image.new('RGB', (WIDTH, height), '#F3F5F9')
+        image = Image.new('RGB',(WIDTH,height),'#F3F5F9')
         draw = ImageDraw.Draw(image)
-        draw.rectangle((0, 0, WIDTH, 12), fill='#BE2440')
-        draw.rounded_rectangle((48, 40, 192, 89), radius=14, fill='#BE2440')
-        draw.text((66, 49), 'РКТМ', font=face(24, True), fill='white')
-        draw.text((218, 51), 'РАСПИСАНИЕ', font=face(22, True), fill='#667085')
-        y = 111
+        draw.rectangle((0,0,WIDTH,10),fill='#BE2440')
+        draw.rounded_rectangle((40,28,177,69),radius=10,fill='#BE2440')
+        draw.text((56,33),'РКТМ',font=face(23,True),fill='white')
+        draw.text((200,36),'РАСПИСАНИЕ',font=face(20,True),fill='#667085')
+        y = 91
         for line in title_lines:
-            draw.text((52, y), line, font=face(44, True), fill='#182230')
-            y += 58
+            draw.text((42,y),line,font=face(40,True),fill='#182230')
+            y += 50
         for line in metadata:
-            draw.text((52, y+3), line, font=face(26), fill='#667085')
-            y += 36
+            draw.text((42,y+2),line,font=face(24),fill='#667085')
+            y += 29
         y = header
-        for kind, lines in cards:
-            h = 48 + LINE_HEIGHT * len(lines)
-            accent = '#BE2440' if kind == 'changes' else '#3661A6'
-            draw.rounded_rectangle((48, y, WIDTH-48, y+h), radius=18, fill='#FFF2F4' if kind == 'changes' else 'white')
-            draw.rounded_rectangle((48, y+16, 54, y+h-16), radius=3, fill=accent)
-            for index, line in enumerate(lines):
-                bold = index == 0 and bool(re.match(r"\d+-й урок", line))
-                draw.text((82, y+22+index*LINE_HEIGHT), line, font=face(32, bold), fill='#182230')
-            y += h + 16
-        draw.line((52, height-76, WIDTH-52, height-76), fill='#D0D5DD', width=1)
-        draw.text((52, height-59), 'Источник: rktm.info', font=face(23), fill='#667085')
-        draw.text((WIDTH-260, height-59), f'Страница {number} / {len(pages)}', font=face(23), fill='#667085')
+        for kind,lines in cards:
+            h = padding+line_height*len(lines)
+            accent = '#BE2440' if kind=='changes' else '#3661A6'
+            draw.rounded_rectangle((40,y,WIDTH-40,y+h),radius=10,fill='#FFF2F4' if kind=='changes' else 'white')
+            draw.rectangle((40,y+8,44,y+h-8),fill=accent)
+            for index,line in enumerate(lines):
+                bold = index==0 and bool(re.match(r"\d+-й урок",line))
+                draw.text((72,y+padding//2+index*line_height),line,font=face(size,bold),fill='#182230')
+            y += h+gap
+        draw.line((42,height-54,WIDTH-42,height-54),fill='#D0D5DD',width=1)
+        draw.text((42,height-43),'Источник: rktm.info',font=face(20),fill='#667085')
+        if len(pages)>1:
+            draw.text((WIDTH-240,height-43),f'Лист {number} / {len(pages)}',font=face(20),fill='#667085')
         output = io.BytesIO()
-        image.save(output, format='PNG', optimize=True)
+        image.save(output,format='PNG',optimize=True)
         results.append(output.getvalue())
     return tuple(results)
 

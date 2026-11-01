@@ -6,7 +6,7 @@ import hashlib
 import json
 import io
 import re
-from datetime import datetime
+from datetime import datetime, timedelta
 from urllib.parse import unquote, urljoin, urlparse
 
 import httpx
@@ -178,6 +178,13 @@ def substitutions_on(day):
 def teacher_label(text):
     names = re.findall(r"[А-ЯЁ][а-яё]+(?:-[А-ЯЁ][а-яё]+)?\s+[А-ЯЁ]\.\s*[А-ЯЁ]\.", text)
     return ", ".join(names) or "не указан в PDF"
+
+
+def relevant_days(today=None):
+    """Only today's and tomorrow's dates in the college timezone; never guessed PDFs."""
+    if today is None:
+        today = datetime.now(ZoneInfo(os.getenv("SCHEDULE_TIMEZONE", "Europe/Moscow"))).date()
+    return [(today+timedelta(days=offset)).isoformat() for offset in (0,1)]
 
 
 def display_date(day):

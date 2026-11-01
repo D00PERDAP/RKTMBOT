@@ -131,15 +131,7 @@ def buttons(rows):
 
 
 def keyboard(uid):
-    labels = [
-        ["📅 Моё расписание"],
-        ["🔄 Мои замены", "📆 Замены по дате"],
-        ["🔎 Все расписания", "⭐ Избранное"],
-        ["👤 Профиль", "🔔 Уведомления"],
-        ["📰 Новости", "❔ Помощь"],
-    ]
-    if str(uid) in ADMIN_IDS:
-        labels.append(["🔐 Админ-панель"])
+    labels = [["📅 Моё расписание", "🔄 Замены"], ["👤 Профиль", "☰ Ещё"]]
     return ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text=text) for text in row] for row in labels],
                                resize_keyboard=True, is_persistent=True)
 
@@ -182,12 +174,35 @@ async def show_settings(message, uid, edit=False):
         edit=edit, reply_markup=buttons([[toggle], [("👤 Профиль", "ui:profile")], home_button()]))
 
 
+async def show_more(message, uid, edit=False):
+    rows = [[("🔎 Все расписания", "browse"), ("⭐ Избранное", "ui:favorites")],
+            [("🔔 Уведомления", "ui:settings"), ("📰 Новости", "ui:news")],
+            [("❔ Помощь", "ui:help")], home_button()]
+    if str(uid) in ADMIN_IDS:
+        rows.insert(-1,[("🔐 Админ-панель", "ui:admin")])
+    await show_screen(message,"☰ Ещё\n\nДополнительные разделы",edit=edit,reply_markup=buttons(rows))
+
+
+async def show_news(message, edit=False):
+    from features import news_list
+    from substitutions import message_parts
+    posts = news_list()[:3]
+    content = "📰 Новости РКТМ\n\n" + ("\n\n".join(p["title"]+"\n"+p["body"] for p in posts) if posts else "Новых публикаций пока нет.")
+    chunks = list(message_parts(content))
+    for index,chunk in enumerate(chunks):
+        markup = buttons([home_button()]) if index==len(chunks)-1 else None
+        if index==0:
+            await show_screen(message,chunk,edit=edit,reply_markup=markup)
+        else:
+            await message.answer(chunk,reply_markup=markup)
+
+
 async def show_help(message, edit=False):
     await show_screen(message, "❔ Как пользоваться ботом\n\n"
         "1. Выбери свою группу или преподавателя.\n"
         "2. Открой «Моё расписание» — бот пришлёт карточки с занятиями.\n"
         "3. Переключай дни кнопками под расписанием.\n\n"
-        "«Мои замены» показывает изменения для тебя, «Замены по дате» — все группы за день.\n"
+        "В разделе «Замены»: «Мои замены» — для тебя, «Сегодня» и «Завтра» — для всех групп.\n"
         "В профиле можно изменить основной выбор, в уведомлениях — включить или выключить подписку.",
         edit=edit, reply_markup=buttons([[("🔎 Все расписания", "browse")], home_button()]))
 
@@ -347,14 +362,20 @@ async def resolve_item(source_key, page, index):
     return parser.groups[page*8+index]
 
 
-def day_keyboard(item_id, selected):
-    from schedule_browser import DAY_SHORT
-    rows = []
-    for start in (0, 3):
-        rows.append([(("• " if i == selected else "") + DAY_SHORT[i], f"day:{item_id}:{i}")
-                     for i in range(start, start+3)])
-    rows += [[("📅 Сегодня", f"today:{item_id}"), ("⭐ В избранное", f"addid:{item_id}")],
-             [("🔄 Мои замены", "subs:mine"), ("🔎 Все расписания", "browse")], home_button()]
+def day_keyboard(item_id, selected, page=0, total=1):
+    labels = ("Пн","Вт","Ср","Чт","Пт","Сб","Вс")
+    previous,following = (selected-1)%7,(selected+1)%7
+    rows = [[(f"← {labels[previous]}",f"sheet:{item_id}:{previous}:0"),
+             ("Сегодня",f"today:{item_id}"),
+             (f"{labels[following]} →",f"sheet:{item_id}:{following}:0")]]
+    pager = []
+    if page:
+        pager.append(("← Лист",f"sheet:{item_id}:{selected}:{page-1}"))
+    if page+1 < total:
+        pager.append(("Лист →",f"sheet:{item_id}:{selected}:{page+1}"))
+    if pager:
+        rows.append(pager)
+    rows.append(home_button())
     return buttons(rows)
 
 
@@ -448,36 +469,38 @@ def schedule_text_parts(title, html, day=None):
     return chunks or ["Расписание отсутствует."]
 
 
-async def show_photo_pages(message, pages, markup, title, edit=False):
-    """Photo limits are enforced by the renderer; navigation belongs to the last page."""
-    with db() as conn:
-        old = conn.execute("SELECT message_id FROM bot_screen_messages WHERE chat_id=?", (str(message.chat.id),)).fetchone()
-    last = None
-    for index, image in enumerate(pages):
-        caption = f"📅 {title.rstrip(' ,')} · {index+1}/{len(pages)}"[:900]
-        kwargs = {"reply_markup": markup} if index == len(pages)-1 else {}
-        photo = BufferedInputFile(image, filename=f"schedule-{index+1}.png")
-        if edit and index == 0:
+async def show_photo_pages(message, pages, markup, title, edit=False, page=0):
+    """One visible photo. Leaf navigation replaces its media instead of appending."""
+    page = min(max(0,page),len(pages)-1)
+    caption = f"📅 {title.rstrip(' ,')}"[:850]
+    if len(pages)>1:
+        caption += f" · Лист {page+1}/{len(pages)}"
+    photo = BufferedInputFile(pages[page],filename="schedule.png")
+    if edit:
+        try:
+            last = await message.edit_media(media=InputMediaPhoto(media=photo,caption=caption),reply_markup=markup)
+        except Exception as error:
+            if "message is not modified" in str(error).lower():
+                last = message
+            else:
+                last = None
+    else:
+        last = None
+    if last is None:
+        with db() as conn:
+            old = conn.execute("SELECT message_id FROM bot_screen_messages WHERE chat_id=?",(str(message.chat.id),)).fetchone()
+        last = await message.answer_photo(photo,caption=caption,reply_markup=markup)
+        if old:
             try:
-                last = await message.edit_media(media=InputMediaPhoto(media=photo, caption=caption), **kwargs)
-                continue
-            except Exception as error:
-                if "message is not modified" in str(error).lower():
-                    last = message
-                    continue
-                log.debug("Cannot replace schedule photo; sending a new one", exc_info=True)
-        last = await message.answer_photo(photo, caption=caption, **kwargs)
-        if index == 0 and old:
-            try:
-                await message.bot.delete_message(message.chat.id, old["message_id"])
+                await message.bot.delete_message(message.chat.id,old["message_id"])
             except Exception:
-                log.debug("Cannot remove old schedule screen", exc_info=True)
+                log.debug("Cannot remove old schedule screen",exc_info=True)
     with db() as conn:
         conn.execute("INSERT INTO bot_screen_messages VALUES(?,?) ON CONFLICT(chat_id) DO UPDATE SET message_id=excluded.message_id",
-                     (str(message.chat.id), last.message_id))
+                     (str(message.chat.id),last.message_id))
 
 
-async def schedule_image(message, source, filename, title, day=None, item_id=None, edit=False):
+async def schedule_image(message, source, filename, title, day=None, item_id=None, edit=False, page=0):
     from app import fetch_html, SCHEDULE_BASE
     from schedule_images import daily_images, plain
     from substitutions import personal_message, message_parts
@@ -494,7 +517,7 @@ async def schedule_image(message, source, filename, title, day=None, item_id=Non
         if day not in range(7):
             raise ValueError("Invalid weekday")
         if day == 6:
-            parts = ["📅 " + escape(title) + " · Воскресенье\nСегодня выходной, уроков нет."]
+            parts = ["📅 " + escape(title) + " · Воскресенье\nВоскресенье — выходной, уроков нет."]
         else:
             html = await fetch_html(urljoin(SCHEDULE_BASE, filename))
             parts = schedule_text_parts(title, html, day)
@@ -504,7 +527,9 @@ async def schedule_image(message, source, filename, title, day=None, item_id=Non
         markup = day_keyboard(item_id, day)
         try:
             pages = await daily_images(title, parts, changes)
-            await show_photo_pages(message, pages, markup, title, edit=edit)
+            page = min(max(0,page),len(pages)-1)
+            markup = day_keyboard(item_id,day,page,len(pages))
+            await show_photo_pages(message,pages,markup,title,edit=edit,page=page)
             return
         except Exception:
             log.exception("Schedule photo unavailable; falling back to complete text")
@@ -556,7 +581,7 @@ async def show_favorites(message, uid, page=0):
     await show_screen(message, "⭐ Избранное\n\n"+text, reply_markup=buttons(rows))
 
 
-@router.callback_query(F.data.startswith(("reg:", "cat:", "view:", "viewid:", "browse", "addid:", "unfav:", "favorite:", "imgid:", "mineid:", "day:", "all:", "today:")))
+@router.callback_query(F.data.startswith(("reg:", "cat:", "view:", "viewid:", "browse", "addid:", "unfav:", "favorite:", "imgid:", "mineid:", "day:", "all:", "today:", "sheet:")))
 async def callback(call: CallbackQuery):
     await call.answer()
     uid = str(call.from_user.id)
@@ -620,6 +645,15 @@ async def callback(call: CallbackQuery):
             await show_screen(call.message,"✅ Основное расписание сохранено\n\n"+title,reply_markup=keyboard(uid))
         else:
             await schedule_image(call.message,source,filename,title,edit=True)
+    elif data.startswith("sheet:"):
+        parts = data.split(":")
+        if len(parts)!=4 or not all(p.isdigit() for p in parts[1:]) or int(parts[2]) not in range(7):
+            return
+        with db() as conn:
+            item = conn.execute("SELECT * FROM bot_catalog_items WHERE id=?",(int(parts[1]),)).fetchone()
+        if item:
+            await schedule_image(call.message,item["source"],item["filename"],item["title"],
+                                 day=int(parts[2]),item_id=item["id"],edit=True,page=int(parts[3]))
     elif data.startswith(("day:", "all:", "today:")):
         parts=data.split(":")
         if len(parts)<2 or not parts[1].isdigit():
@@ -700,32 +734,22 @@ async def personal(message: Message):
 
 
 def substitution_menu():
-    return buttons([[("👤 Мои замены", "subs:mine")],
-                    [("📆 Замены по дате", "subs:dates")],
-                    [("🏠 Главное меню", "ui:home")]])
+    return substitution_dates()
 
 
 def substitution_dates(page=0):
-    from substitutions import published_dates, display_date
-    dates = published_dates()
-    pages = max(1, (len(dates)+9)//10)
-    page = min(max(page, 0), pages-1)
-    rows = [[(f"📆 {display_date(day)}", f"subs:day:{day}")] for day in dates[page*10:page*10+10]]
-    nav = []
-    if page:
-        nav.append(("← Назад", f"subs:dates:{page-1}"))
-    if page+1 < pages:
-        nav.append(("Далее →", f"subs:dates:{page+1}"))
-    if nav:
-        rows.append(nav)
-    rows += [[("🔄 Раздел замен", "subs:menu")], home_button()]
+    from substitutions import relevant_days,display_date
+    dates = relevant_days()
+    rows = [[(f"{label} · {display_date(day)}",f"subs:day:{day}")]
+            for label,day in zip(("Сегодня","Завтра"),dates)]
+    rows += [[("👤 Мои замены","subs:mine")],home_button()]
     return buttons(rows)
 
 
 async def substitution_callback_content(message, uid, action, edit=False, page=0):
-    from substitutions import personal_overview, published_dates, message_parts
+    from substitutions import personal_overview, message_parts
     if action == "dates":
-        text = "📆 Замены по дате\n\n" + ("Выбери опубликованный день. Здесь показаны замены всех групп." if published_dates() else "Опубликованных замен пока нет. Попробуй зайти позже.")
+        text = "📆 Замены на день\n\nВыбери сегодня или завтра. Если замены ещё не опубликованы, бот сообщит об этом."
         await show_screen(message, text, edit=edit, reply_markup=substitution_dates(page))
     else:
         p = user("telegram", uid)
@@ -741,14 +765,14 @@ async def substitution_callback_content(message, uid, action, edit=False, page=0
 
 @router.callback_query(F.data.startswith("subs:"))
 async def substitution_callback(call: CallbackQuery):
-    from substitutions import substitutions_on, format_day_changes, published_dates, message_parts
+    from substitutions import substitutions_on, format_day_changes, relevant_days, message_parts
     await call.answer()
     uid = str(call.from_user.id)
     action = call.data
     if action == "subs:home":
         await show_home(call.message, uid)
     elif action == "subs:menu":
-        await show_screen(call.message, "🔄 Замены\n\n«Мои замены» — изменения для тебя.\n«По дате» — все группы за опубликованный день.", edit=True, reply_markup=substitution_menu())
+        await show_screen(call.message, "🔄 Замены\n\n«Мои замены» — изменения для тебя.\n«Сегодня» и «Завтра» — замены всех групп за выбранный день.", edit=True, reply_markup=substitution_menu())
     elif action == "subs:mine":
         await substitution_callback_content(call.message, uid, "mine", edit=True)
     elif action == "subs:dates" or action.startswith("subs:dates:"):
@@ -756,7 +780,7 @@ async def substitution_callback(call: CallbackQuery):
         await substitution_callback_content(call.message, uid, "dates", edit=True, page=int(value) if value.isdigit() else 0)
     elif action.startswith("subs:day:"):
         day = action.removeprefix("subs:day:")
-        if day not in published_dates():
+        if day not in relevant_days():
             await substitution_callback_content(call.message, uid, "dates", edit=True)
             return
         chunks = list(message_parts(format_day_changes(substitutions_on(day), day)))
@@ -815,6 +839,15 @@ async def interface_callback(call: CallbackQuery):
     uid = str(call.from_user.id)
     if call.data == "ui:home":
         await show_home(call.message, uid)
+    elif call.data == "ui:more":
+        await show_more(call.message,uid,edit=True)
+    elif call.data == "ui:help":
+        await show_help(call.message,edit=True)
+    elif call.data == "ui:news":
+        await show_news(call.message,edit=True)
+    elif call.data == "ui:admin":
+        if uid in ADMIN_IDS:
+            await show_screen(call.message,"🔐 Админ-панель\n/addteacher ID\n/removeteacher ID\n/teachers",edit=True,reply_markup=buttons([home_button()]))
     elif call.data == "ui:profile":
         await profile(call.message, uid, edit=True)
     elif call.data == "ui:settings":
@@ -895,7 +928,7 @@ async def text_handler(message: Message):
         else:
             await message.answer("Неверный код. Попробуй ещё раз или /register.")
         return
-    if text in ("📅 Моё расписание", "📅 Расписание", "🔎 Все расписания", "📚 Выбрать расписание", "⭐ Избранное", "👤 Профиль", "🔐 Админ-панель", "🔔 Уведомления", "📰 Новости", "🔄 Замены", "🔄 Мои замены", "📆 Замены по дате", "❔ Помощь"):
+    if text in ("📅 Моё расписание", "📅 Расписание", "🔎 Все расписания", "📚 Выбрать расписание", "⭐ Избранное", "👤 Профиль", "🔐 Админ-панель", "🔔 Уведомления", "📰 Новости", "🔄 Замены", "🔄 Мои замены", "📆 Замены по дате", "❔ Помощь", "☰ Ещё"):
         try:
             await message.delete()
         except Exception:
@@ -924,16 +957,8 @@ async def text_handler(message: Message):
     elif text=="📆 Замены по дате":
         await substitution_callback_content(message, uid, "dates")
     elif text=="📰 Новости":
-        from features import news_list
-        from substitutions import message_parts
-        items = news_list()[:3]
-        content = "📰 Новости РКТМ\n\n" + ("\n\n".join(item["title"]+"\n"+item["body"] for item in items) if items else "Новых публикаций пока нет.")
-        chunks = list(message_parts(content))
-        for index, chunk in enumerate(chunks):
-            markup = buttons([home_button()]) if index == len(chunks)-1 else None
-            if index == 0:
-                await show_screen(message, chunk, reply_markup=markup)
-            else:
-                await message.answer(chunk, reply_markup=markup)
+        await show_news(message)
+    elif text=="☰ Ещё":
+        await show_more(message,uid)
     else:
         await message.answer("Выбери действие из меню.",reply_markup=keyboard(uid) if account(uid) else None)
