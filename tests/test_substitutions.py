@@ -121,7 +121,7 @@ class StoreTests(unittest.IsolatedAsyncioTestCase):
             c.execute("INSERT INTO max_states VALUES('7','Praspisan',0)")
         init_max()
         self.assertEqual(features.user('max',7)['notifications'],0)
-        with patch('max_bot.fetch_html', AsyncMock(return_value='<a href="m1.html">Гуркина Ю.А.</a>')), patch('max_bot.show_schedule', AsyncMock()):
+        with patch('max_bot.fetch_html', AsyncMock(return_value='<a href="m1.html">Гуркина Ю.А.</a>')), patch('max_bot.send', AsyncMock()):
             await choose(AsyncMock(), '7', 1)
         p=features.user('max',7)
         self.assertEqual(p['source'],'Praspisan')

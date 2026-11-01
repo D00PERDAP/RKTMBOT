@@ -52,3 +52,12 @@ Use a dedicated unprivileged service account when available. Do not commit `.env
 `/start`, `/help`, `/groups`, `/teachers`, `/next`, `/prev`, `/today`, `/day 0` through `/day 5`, `/profile`, `/save`, `/favorites`, `/news`.
 
 The adapter supports inline menus, personal substitutions for students and teachers, published substitution dates, /notify and /mute. See SERVER_UPDATE.md for shared DATABASE_PATH, migration and monitor ownership. MAX admin functions are not implemented.
+
+
+## Chat interface
+
+The main menu shows the saved group/teacher and notification status. Daily schedule and personal substitutions are the primary actions. Settings offer one action matching the current notification state. Profile changes require selecting a specific catalog item; catalog buttons contain the source and filename, so old pages cannot silently select a different item.
+
+Catalogs, published dates and favorites are paginated. Favorites open in preview mode, with day switching that does not modify the saved profile or notification preference. Menus use plain text and native inline keyboards; no additional permissions, Mini App or database migration is required for this interface update. Existing numeric catalog commands remain supported.
+
+Manual acceptance in MAX: /start, registration as student and teacher, catalog next/back, opening an older catalog button, /today and day buttons, personal substitutions, published dates, favorites with day switching, notification toggle, and return to the main menu. Transport/navigation regressions are covered in tests/test_max_navigation.py; an actual MAX client still needs a visual check after deployment.
